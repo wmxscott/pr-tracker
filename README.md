@@ -195,31 +195,101 @@ Commands that act on a session take `--session ID`. Without it they use `$PR_TRA
 | `~/.local/state/pr-tracker/refresh.lock` | Keeps two refreshes from overlapping |
 | `$(brew --prefix)/var/log/pr-tracker.log` | Service log, with Homebrew. It records when a repository's refresh starts or stops failing, not every tick |
 
-### Upgrading from the standalone script
-
-Before 1.0, pr-tracker ran as a script inside an agent plugin. 1.0 uses the same ledger path, database schema, settings file and environment overrides, so your tracked PRs and pending events carry straight over. Stop the old launch agent when you start the new service. Running both is harmless, since the lock and the due check keep them apart, but one ticker is enough.
-
 ## herdr
 
-pr-tracker doesn't need herdr, but the two fit well: a herdr action can open `prs` in a popup, scoped to the agent in the pane you were looking at. A plugin manifest needs a pane that runs `prs`, and an action that opens it:
+pr-tracker doesn't need [herdr](https://herdr.dev), but the two fit well: one key opens `prs` in a herdr popup, scoped to the agent in the pane you were looking at. The popup gets the session through `PR_TRACKER_SESSION_ID`. Without a session, `prs` shows every open PR.
+
+There are two ways to set it up.
+
+### A plugin of your own
+
+A herdr plugin is a directory with a manifest. Put these two files in one, anywhere you like, such as `~/herdr-plugins/prs/`.
+
+`herdr-plugin.toml` declares a popup pane that runs `prs`, and an action that opens it:
 
 ```toml
-[[panes]]
 id = "prs"
+name = "Session PRs"
+version = "0.1.0"
+min_herdr_version = "0.7.4"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "picker"
 title = "pull requests"
 placement = "popup"
-command = ["prs"]
 width = "100%"
 height = "80%"
+command = ["prs"]
 
 [[actions]]
-id = "prs"
+id = "open"
 title = "Open session PRs"
 contexts = ["workspace"]
-command = ["open-prs"]   # your script, below
+command = ["python3", "open-prs.py"]
 ```
 
-The action's script looks up the agent session running in the focused pane (from `HERDR_PLUGIN_CONTEXT_JSON` and herdr's agent list), then asks herdr to open the pane with `PR_TRACKER_SESSION_ID` set to it in the pane's `env`. Resolve the session in the action, before the popup opens. Once it's open the popup has the focus, not the agent. Without a session, `prs` shows every open PR. Bind the action to any key you like.
+`open-prs.py` is the action. It finds the agent session in the focused pane, then opens the pane with `PR_TRACKER_SESSION_ID` set to it:
+
+```python
+import json
+import os
+import subprocess
+
+herdr = os.environ.get("HERDR_BIN_PATH", "herdr")
+context = json.loads(os.environ.get("HERDR_PLUGIN_CONTEXT_JSON") or "{}")
+
+plugin = os.environ["HERDR_PLUGIN_ID"]
+args = [herdr, "plugin", "pane", "open", "--plugin", plugin, "--entrypoint", "picker", "--focus"]
+if context.get("focused_pane_agent"):
+    listing = subprocess.run([herdr, "agent", "list"], capture_output=True, text=True).stdout
+    for agent in json.loads(listing or "{}").get("result", {}).get("agents", []):
+        session = agent.get("agent_session") or {}
+        if agent.get("pane_id") == context.get("focused_pane_id") and session.get("value"):
+            args += ["--env", f"PR_TRACKER_SESSION_ID={session['value']}"]
+subprocess.run(args)
+```
+
+herdr runs both commands from the plugin's directory. Register the plugin, then bind the action to a key in herdr's `config.toml`:
+
+```sh
+herdr plugin link ~/herdr-plugins/prs
+```
+
+```toml
+[[keys.command]]
+key = "prefix+P"
+type = "plugin_action"
+command = "prs.open"
+description = "session PRs"
+```
+
+### herdr-launchpad
+
+[herdr-launchpad](https://github.com/wmxscott/herdr-launchpad) is a herdr plugin that opens terminal tools in popups, from an icon picker or a key, and can hand them the focused pane's agent session. With it installed, `prs` is one entry in its config file, `$(herdr plugin config-dir launchpad)/config.toml`:
+
+```toml
+[[entries]]
+id = "prs"
+title = "pull requests"
+command = ["prs"]
+icon = "\ue726"
+color = "mauve"
+width = "100%"
+height = "80%"
+slot = 1
+session_env = "PR_TRACKER_SESSION_ID"
+```
+
+`session_env` sets `PR_TRACKER_SESSION_ID` to the session of the agent in the focused pane. Add `requires_session = true` to offer `prs` only in panes running an agent. `slot = 1` lets a key open it directly:
+
+```toml
+[[keys.command]]
+key = "prefix+P"
+type = "plugin_action"
+command = "launchpad.slot-1"
+description = "session PRs"
+```
 
 ## Limitations
 
