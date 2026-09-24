@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Runs `pr-tracker refresh` every minute, for installs without Homebrew.
+  launchd is only the ticker: each run exits at once unless the refresh
+  interval in settings.toml has passed. Expects pr-tracker in ~/.local/bin,
+  where `uv tool install` and `pipx install` put it, and gh in one of the
+  PATH entries below.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.wmxscott.pr-tracker</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>exec "$HOME/.local/bin/pr-tracker" refresh</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>60</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>/tmp/pr-tracker.log</string>
+</dict>
+</plist>
