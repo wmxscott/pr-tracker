@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Lint
+        run: |
+          uv run ruff check
+          uv run ruff format --check
+      - name: Test
+        run: uv run pytest
+      - name: Smoke test
+        run: |
+          uv run pr-tracker --version
+          uv run pr-tracker --help
+          uv run prs --version
+          uv run prs --help
+          echo '{}' | uv run pr-tracker hook post-bash
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
