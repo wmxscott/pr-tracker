@@ -19,6 +19,8 @@ They answer "which PRs exist?". pr-tracker answers "what did *this session* open
 
 Anything the hook didn't see, like a PR opened in the browser or by an earlier session, can be attached with `pr-tracker adopt`.
 
+Design notes: [docs/design.md](docs/design.md).
+
 ## Install
 
 pr-tracker needs:
