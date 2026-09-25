@@ -40,13 +40,14 @@ MODES = ("post-bash", "post-mcp", "post-tool", "prompt", "stop", "wait", "auto")
 DELIVERING = ("post-bash", "post-mcp", "post-tool", "prompt")
 EVENT_NAMES = {"prompt": "UserPromptSubmit", "stop": "Stop"}
 TOOL_EVENTS = ("PostToolUse", "PostToolUseFailure", "post_tool_use", "")
-SHELL_TOOLS = {"bash", "shell", "local_shell", "exec_command", "run_shell_command"}
+SHELL_TOOLS = {"bash", "shell", "local_shell", "exec_command", "run_shell_command", "powershell"}
 # Codex adds these to every turn-scoped hook input, a deliberate departure from
 # Claude Code's schema (codex-rs/hooks/src/schema.rs at rust-v0.156.1).
 CODEX_KEYS = ("turn_id",)
 WAIT_SECONDS = 540
 WAIT_POLL_SECONDS = 15
 WAKE_EXIT = 2
+WAITERS = ("claude", "pi")
 
 
 def infer_mode(payload: dict[str, Any]) -> str | None:
@@ -141,10 +142,10 @@ def respond(
         rows = ledger.pending(where.db, session_id)
         if not rows:
             return None
-        # Claude Code continues a turn on Stop additionalContext, Codex only on a
-        # block decision whose reason becomes the next prompt. stop_hook_active
-        # means this turn already continued once.
-        wake = cfg["wake"] and cfg["post_tool_use"] and agent in ("claude", "codex")
+        # Claude Code and Pi's extension continue a turn on Stop additionalContext,
+        # Codex only on a block decision whose reason becomes the next prompt.
+        # stop_hook_active means this turn already continued once.
+        wake = cfg["wake"] and cfg["post_tool_use"] and agent in ("claude", "codex", "pi")
         if wake and not payload.get("stop_hook_active") and any(map(ledger.is_actionable, rows)):
             claimed = ledger.claim(where.db, session_id)
             if not claimed:
@@ -191,8 +192,9 @@ def wait(
     from pr_tracker import config, ledger, paths
 
     session_id = _session(payload)
-    # Only Claude Code runs this in the background; anywhere else it would hold up the turn.
-    if not session_id or is_subagent(payload) or (agent or infer_agent(payload)) != "claude":
+    # Only Claude Code and Pi's extension run this in the background; anywhere
+    # else it would hold up the turn.
+    if not session_id or is_subagent(payload) or (agent or infer_agent(payload)) not in WAITERS:
         return None
     where = paths.resolve(env)
     cfg = config.load(where.config)

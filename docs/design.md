@@ -432,9 +432,10 @@ ignores `Stop` `additionalContext` and continues a turn only on
 it returns exactly that and nothing else: Codex rejects unknown fields in
 `Stop` output. For Claude Code it never returns `decision: "block"`. Either
 way it continues a turn at most once: `stop_hook_active` means it already
-did, and then it only shows the events. Pi isn't known to continue a turn
-from a hook, so for any other agent it only shows them too. Consuming them
-there would lose them.
+did, and then it only shows the events. Pi's extension treats
+`additionalContext` the way Claude Code does, continuing the run once, so
+`pi` gets it too. Any other agent isn't known to continue a turn from a hook,
+so for it `stop` only shows them. Consuming them there would lose them.
 
 **`wait` wakes an idle session.** Claude Code runs a `Stop` hook marked
 `asyncRewake` in the background, and when it exits 2 its output reaches the
@@ -443,8 +444,10 @@ agent as a system reminder that starts a new turn, even with no user present.
 two indexed read-only queries, for up to `--for` seconds (keep it under the
 hook's `timeout`, which Claude Code enforces even here). When an actionable
 event arrives it claims every queued event, prints them and exits 2. It
-exits 0 at once for a subagent, for a session with no open PRs, or with
-waking turned off, and stops early when the session's PRs have all closed.
+exits 0 at once for a subagent, for any agent but `claude` and `pi` (Codex
+would run it synchronously and hold the turn open), for a session with no
+open PRs, or with waking turned off, and stops early when the session's PRs
+have all closed.
 Each turn's end starts a new waiter, so a session would otherwise collect
 them: a waiter records a token under `waiters/` in the state directory and
 quits when a newer one has replaced it.

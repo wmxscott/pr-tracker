@@ -175,11 +175,18 @@ def test_waking_off_only_shows(where):
 
 
 def test_other_agents_only_show_at_stop(where):
-    """Only Claude Code and Codex are known to continue a turn from a Stop hook."""
+    """Only Claude Code, Codex and Pi's extension are known to continue a turn from Stop."""
     add_event(where.db, add_pr(where.db, 1))
-    _, out = call(["stop", "--agent", "pi"], stop())
+    _, out = call(["stop", "--agent", "other"], stop())
     assert "systemMessage" in out
     assert ledger.drain(where.db, "s", peek=True)
+
+
+def test_pi_continues_a_turn_through_additional_context(where):
+    add_event(where.db, add_pr(where.db, 1))
+    _, out = call(["stop", "--agent", "pi"], stop())
+    assert "checks failing" in out["hookSpecificOutput"]["additionalContext"]
+    assert ledger.drain(where.db, "s", peek=True) == []
 
 
 @pytest.mark.parametrize("kind", ["checks_failed", "review_changed"])
@@ -403,11 +410,17 @@ def test_a_synthesized_pi_payload(where):
     assert agent_of(where) == "pi"
 
     add_event(where.db, add_pr(where.db, 3))
-    result = run_cli(["--agent", "pi"], json.dumps(pi_payload(event="Stop")))
+    shown = {**pi_payload(event="Stop"), "stop_hook_active": True}
+    result = run_cli(["--agent", "pi"], json.dumps(shown))
     assert "checks failing" in json.loads(result.stdout)["systemMessage"]
     result = run_cli(["--agent", "pi"], json.dumps(pi_payload()))
     context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
     assert context.startswith("Tracked pull request updates:")
+
+    add_event(where.db, add_pr(where.db, 3), signature="second")
+    result = run_cli(["--agent", "pi"], json.dumps(pi_payload(event="Stop")))
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "checks failing" in context
 
 
 @pytest.mark.parametrize(
@@ -505,9 +518,11 @@ class Clock:
         return self.now
 
 
-def wait(clock, seconds=60, **extra):
+def wait(clock, seconds=60, agent=None, **extra):
     body = {"session_id": "s", "hook_event_name": "Stop", **extra}
-    return hook.wait(body, dict(os.environ), seconds, poll=10, sleep=clock.sleep, clock=clock)
+    return hook.wait(
+        body, dict(os.environ), seconds, poll=10, sleep=clock.sleep, clock=clock, agent=agent
+    )
 
 
 def test_wait_wakes_on_an_actionable_event(where):
@@ -605,3 +620,17 @@ def test_wait_clears_markers_left_by_killed_waiters(where):
     os.utime(stale, (time.time() - 2 * 86400,) * 2)
     wait(Clock(), seconds=10)
     assert sorted(p.name for p in waiters.iterdir()) == ["fresh"]
+
+
+def test_wait_runs_for_pi_but_not_other_agents(where):
+    pr_id = add_pr(where.db, 1)
+    clock = Clock(lambda n: n == 1 and add_event(where.db, pr_id))
+    assert "checks failing" in wait(clock, agent="pi")
+    assert wait(Clock(), agent="other") is None
+
+
+def test_powershell_records_a_created_pr(where):
+    body = payload("gh pr create --fill", url(4))
+    body["tool_name"] = "powershell"
+    call([], body)
+    assert ("o/r", 4) in tracked(where)
