@@ -87,12 +87,13 @@ def _main(argv: list[str], env: Mapping[str, str]) -> int:
 
     p = sub.add_parser(
         "hook",
-        help="agent hook entry point: post-bash, post-mcp or stop, reading hook JSON on stdin",
+        help="agent hook entry point, reading hook JSON on stdin",
     )
-    p.add_argument("mode", nargs="?", choices=["post-bash", "post-mcp", "stop", "auto"])
+    p.add_argument("mode", nargs="?", choices=list(hook_modes()))
     p.add_argument(
         "--agent", help="agent name recorded with new sessions (default: codex or claude, inferred)"
     )
+    p.add_argument("--for", metavar="SECONDS", help="how long `wait` waits (default: 540)")
 
     p = sub.add_parser("record", help="attach PR URLs to a session, for custom integrations")
     session_arg(p, "the session to attach them to")
@@ -122,6 +123,12 @@ def _main(argv: list[str], env: Mapping[str, str]) -> int:
         parser.print_help()
         return 2
     return args.func(args, env)
+
+
+def hook_modes() -> tuple[str, ...]:
+    from pr_tracker.hook import MODES
+
+    return MODES
 
 
 def _err(message: str) -> None:

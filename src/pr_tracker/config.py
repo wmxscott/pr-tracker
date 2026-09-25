@@ -26,6 +26,7 @@ SCHEMA: dict[str, dict[str, tuple[Any, str, float | None]]] = {
     "notify": {
         "post_tool_use": (True, "bool", None),
         "stop_surface": (True, "bool", None),
+        "wake": (True, "bool", None),
     },
     "picker": {
         "theme": ("auto", "theme", None),

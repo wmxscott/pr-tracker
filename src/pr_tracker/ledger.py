@@ -287,8 +287,14 @@ def enqueue(
     )
 
 
-def drain(db: Path, session_id: str, peek: bool = False) -> list[str]:
-    """Pending event lines for one session, marked consumed unless peeking.
+PENDING_SQL = (
+    "SELECT e.id, e.kind, e.detail, p.url FROM events e JOIN prs p ON p.id = e.pr_id"
+    " WHERE e.session_id = ? AND e.consumed_at IS NULL ORDER BY e.created_at, e.id"
+)
+
+
+def pending(db: Path, session_id: str) -> list[sqlite3.Row]:
+    """A session's undelivered events, read-only.
 
     Called by the hook on every tool call, so the empty case must cost as
     little as possible: no database file means no connection at all.
@@ -297,26 +303,64 @@ def drain(db: Path, session_id: str, peek: bool = False) -> list[str]:
         return []
     conn = connect(db, readonly=True)
     try:
-        rows = conn.execute(
-            "SELECT e.id, e.detail, p.url FROM events e JOIN prs p ON p.id = e.pr_id"
-            " WHERE e.session_id = ? AND e.consumed_at IS NULL ORDER BY e.created_at, e.id",
-            (session_id,),
-        ).fetchall()
+        return conn.execute(PENDING_SQL, (session_id,)).fetchall()
     finally:
         conn.close()
-    if not rows:
-        return []
-    if not peek:
-        writer = connect(db, migrate=False)
-        try:
-            writer.executemany(
-                "UPDATE events SET consumed_at = ? WHERE id = ?",
-                [(int(time.time()), r["id"]) for r in rows],
-            )
-            writer.commit()
-        finally:
-            writer.close()
+
+
+def claim(db: Path, session_id: str) -> list[sqlite3.Row]:
+    """Mark a session's pending events consumed and return exactly those.
+
+    Several hooks can deliver at once (a tool call, a prompt, the idle
+    waiter), so the read and the write share one write transaction: each
+    event goes to whichever hook claims it first, and to no other.
+    """
+    conn = connect(db, migrate=False)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(PENDING_SQL, (session_id,)).fetchall()
+        conn.executemany(
+            "UPDATE events SET consumed_at = ? WHERE id = ?",
+            [(int(time.time()), r["id"]) for r in rows],
+        )
+        conn.commit()
+        return rows
+    finally:
+        conn.close()
+
+
+def is_actionable(row: sqlite3.Row) -> bool:
+    """Red checks or a review decision: events worth interrupting an agent for."""
+    return row["kind"] in ("checks_failed", "review_changed")
+
+
+def event_lines(rows: list[sqlite3.Row]) -> list[str]:
     return [f"- {row['detail']} ({row['url']})" for row in rows]
+
+
+def drain(db: Path, session_id: str, peek: bool = False) -> list[str]:
+    """Pending event lines for one session, marked consumed unless peeking."""
+    rows = pending(db, session_id)
+    if rows and not peek:
+        rows = claim(db, session_id)
+    return event_lines(rows)
+
+
+def has_open_prs(db: Path, session_id: str) -> bool:
+    if not session_id or not db.exists():
+        return False
+    conn = connect(db, readonly=True)
+    try:
+        return (
+            conn.execute(
+                "SELECT 1 FROM session_prs sp JOIN prs p ON p.id = sp.pr_id"
+                " WHERE sp.session_id = ? AND p.state = 'open' LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            is not None
+        )
+    finally:
+        conn.close()
 
 
 def flush(db: Path, session_id: str | None = None) -> int:

@@ -140,12 +140,15 @@ def add_pr(
         conn.close()
 
 
-def add_event(db: Path, pr_id: int, session: str = "s", signature: str = "lint") -> None:
+def add_event(
+    db: Path, pr_id: int, session: str = "s", signature: str = "lint", kind: str = "checks_failed"
+) -> None:
+    detail = f"checks failing: {signature}" if kind == "checks_failed" else f"{kind}: {signature}"
     conn = sqlite3.connect(db)
     conn.execute(
         "INSERT INTO events (pr_id, session_id, kind, signature, detail, created_at)"
-        " VALUES (?, ?, 'checks_failed', ?, ?, 1)",
-        (pr_id, session, signature, f"checks failing: {signature}"),
+        " VALUES (?, ?, ?, ?, ?, 1)",
+        (pr_id, session, kind, signature, detail),
     )
     conn.commit()
     conn.close()

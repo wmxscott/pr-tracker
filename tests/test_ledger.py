@@ -172,3 +172,20 @@ def test_readonly_connect_handles_awkward_paths(tmp_path):
     conn = ledger.connect(db, readonly=True)
     assert conn.execute("SELECT COUNT(*) c FROM prs").fetchone()["c"] == 0
     conn.close()
+
+
+def test_claim_hands_each_event_to_one_caller(where):
+    pr_id = add_pr(where.db, 1)
+    add_event(where.db, pr_id)
+    add_event(where.db, pr_id, signature="abc", kind="checks_passed")
+    first = ledger.claim(where.db, "s")
+    assert [row["kind"] for row in first] == ["checks_failed", "checks_passed"]
+    assert ledger.claim(where.db, "s") == []
+
+
+def test_actionable_events(where):
+    pr_id = add_pr(where.db, 1)
+    for kind in ("checks_failed", "review_changed", "checks_passed", "merged", "closed"):
+        add_event(where.db, pr_id, signature=kind, kind=kind)
+    kinds = [r["kind"] for r in ledger.pending(where.db, "s") if ledger.is_actionable(r)]
+    assert kinds == ["checks_failed", "review_changed"]
