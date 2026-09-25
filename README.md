@@ -4,6 +4,10 @@
 
 Keeps track of the pull requests your coding agents open, keeps their status fresh in the background, and tells the agent session that opened a PR when its checks or reviews change.
 
+![prs picker](docs/screenshots/prs.png)
+
+*`prs` in one agent session: two stacks and four standalone PRs, with checks, reviews and undelivered events at a glance, and the highlighted PR's failing checks in the preview.*
+
 An agent that opens a PR usually moves on and forgets it. A few minutes later CI goes red, or a reviewer asks for changes, and nobody tells the agent. pr-tracker closes that loop. It records every PR a session creates, polls GitHub for their checks and reviews, and hands the changes back to the session as context on its next tool call. You don't type anything. `prs` shows the whole set in an fzf picker, with stacked PRs grouped under their base.
 
 ## Why not `gh pr list` or `gh dash`?
@@ -135,6 +139,10 @@ prs --print              # print the list once, no fzf
 Each row shows the PR's state, number and title, then three groups of status: what CI thinks (a verdict, then pass, fail, pending and skipped counts), what people think (the review verdict, and how many of its events have reached the session, like `2/3`), and what's wrong with the PR itself (a lost base branch, or `stale` when refreshes have been failing). *Needs attention* means an open PR with failing checks, changes requested, or undelivered events. The preview shows the branches, review and merge state, every check with failures first, and the description.
 
 A PR whose base branch is another tracked PR's head is shown under it, so stacks from `gh stack`, Graphite or plain git all group the same way. When the opening view is empty, the picker widens the state filter before it gives up the session filter, so a session whose PRs have all merged still opens on its own PRs.
+
+![prs picker, every session and every state](docs/screenshots/prs-all.png)
+
+*`s` and `a` widened to every session's PRs in every state: a merged and a closed PR, and another session's work, join the list.*
 
 `R` marks events delivered without the owning agent ever seeing them. Use it when you've dealt with them yourself.
 
@@ -316,6 +324,10 @@ uv run ruff check && uv run ruff format --check
 ```
 
 The tests run against a temporary `HOME` with a fake `gh` first on `PATH`, so they never read your ledger or reach GitHub. `tests/test_refresh.py` drives batching, events and failures through that fake, and `tests/test_hook.py` checks the hook contract through the real entry point.
+
+### Regenerating the screenshots
+
+The screenshots show made-up PRs. `scripts/demo-ledger.py` seeds a throwaway ledger, and `scripts/demo --vhs` renders it with [VHS](https://github.com/charmbracelet/vhs) from `docs/screenshots/prs.tape`, in an empty environment with a `gh` that always fails. It needs `brew install vhs`, fzf and FiraCode Nerd Font. `scripts/demo` on its own opens the same picker in your terminal.
 
 ## License
 
