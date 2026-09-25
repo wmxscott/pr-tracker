@@ -34,7 +34,7 @@ the default one when the picker is opened from inside a session.
 | Cadence | A scheduler ticks every 60 s; the tick refreshes only every 300 s ± 30 s |
 | Retention | Merged or closed PRs are dropped 30 days after they close (configurable) |
 | Human notification | Pull only, through the picker; `Stop` also shows undelivered events |
-| Agent notification | Delivered on the session's next tool call, mid-turn |
+| Agent notification | Delivered on the session's next tool call or prompt; failing checks and review decisions also continue a finished turn, or wake an idle Claude Code session (§7) |
 | Failure handling | Skip silently, keep the last known state, mark it `stale` in the picker |
 | Runtime | Python 3.11+, standard library only; every GitHub call goes through `gh` |
 | Repo scope | Any repo an agent opens a PR in; no allowlist |
@@ -67,7 +67,7 @@ overlap.
 
 ### 3.1 Why the hook does no network I/O
 
-The hook runs after every shell command in every session. It scrapes the PR
+The hook runs after every tool call in every session. It scrapes the PR
 URL out of the tool's output, writes a minimal row flagged `needs_hydrate`,
 and returns. Title, checks, review state and branches are filled in by the
 next refresh. This keeps the hook fast, safe offline, and independent of
@@ -81,9 +81,9 @@ The hot path is trimmed further:
 - Delivery with an empty queue costs one indexed `SELECT` on a read-only
   connection, and marking events delivered skips the schema check that
   other writers run.
-- It always exits 0 with nothing on stderr. A bad payload, a locked or
-  broken ledger, or a full disk all end in silence. A PR tracker isn't worth
-  breaking a tool call over.
+- It always exits 0 with nothing on stderr, `wait` aside (§7). A bad
+  payload, a locked or broken ledger, or a full disk all end in silence. A PR
+  tracker isn't worth breaking a tool call over.
 
 ### 3.2 Session identity
 
@@ -204,14 +204,21 @@ One command, `pr-tracker hook`, with a mode per hook:
 
 | Hook | Matcher | Mode |
 |---|---|---|
-| `PostToolUse` | `Bash` | `post-bash`: record if the command created PRs, then deliver events |
-| `PostToolUse` | `mcp__.*github.*__create_pull_request` | `post-mcp`: record from the tool response, then deliver events |
-| `Stop` | | `stop`: show undelivered events without consuming them |
+| `PostToolUse`, `PostToolUseFailure` | shell tools | `post-bash`: record if the command created PRs, then deliver events |
+| `PostToolUse`, `PostToolUseFailure` | `mcp__.*github.*__create_pull_request` | `post-mcp`: record from the tool response, then deliver events |
+| `PostToolUse`, `PostToolUseFailure` | any other tool | `post-tool`: deliver events |
+| `UserPromptSubmit` | | `prompt`: deliver events |
+| `Stop` | | `stop`: continue the turn with actionable events, else show them without consuming them |
+| `Stop`, `asyncRewake` | | `wait`: in the background, wait for actionable events and wake the agent |
 
 With no mode, it infers one from the payload's `hook_event_name` and
-`tool_name`. Each tool call gets exactly one invocation that both records and
-delivers. Two separate hooks, each opening the database on every shell call,
-is the cost this avoids.
+`tool_name`, so one unmatched `PostToolUse` entry covers every tool. Each tool
+call gets exactly one invocation that both records and delivers. Two separate
+hooks, each opening the database on every shell call, is the cost this
+avoids. A failed shell command fires `PostToolUseFailure` instead of
+`PostToolUse`, with its output in `error` rather than `tool_response`; a
+`gh pr create` followed by a failing command in the same call is still
+recorded from there.
 
 The [`pr-tracker@ai-toolkit`](https://github.com/wmxscott/ai-toolkit) plugin
 registers these hooks in Claude Code, Codex and Pi, adds a `/prs` command, and
@@ -401,23 +408,62 @@ The signature is the backstop under all of that:
 database level rather than in the diff logic. A PR that stays red across
 twenty ticks produces one event.
 
-**Delivery.** After each tool call, the hook drains the session's unconsumed
-events into `hookSpecificOutput.additionalContext`, headed
-`Tracked pull request updates:`. It is automatic and mid-turn, and the user
-types nothing. Nothing is registered on `UserPromptSubmit`, and the user's
-prompt is never modified.
+**Delivery.** After each tool call, and when the user submits a prompt, the
+hook delivers the session's unconsumed events into
+`hookSpecificOutput.additionalContext`, headed `Tracked pull request updates:`.
+It is automatic, and the user types nothing. The prompt itself is never
+modified; the events arrive alongside it. Every tool counts, not only shell
+commands: an agent that is orchestrating subagents, editing files or reading
+may go a long time without a shell call of its own.
 
-**`Stop` is passive.** It shows unconsumed events to the user as a
-`systemMessage` and never returns `decision: "block"`. A blocking Stop would
-fight the user's turn boundary on unrelated stops, and these events are
-informational often enough that forcing a continuation is the wrong default.
+That still leaves the case that matters most. An agent opens a PR, says it's
+done, and ends its turn. CI goes red ten minutes later, and no hook fires
+until the user types again, so the agent never reacts. Two more paths close
+it, both only for **actionable** events: `checks_failed` and `review_changed`.
+Green checks, merges and closes stay informational and wait for the next
+tool call or prompt.
 
-Stop also *peeks* rather than consuming. Marking events read there would show
-them to the user while the agent that owns the PR never sees them. Leaving
-them queued means the next tool call still delivers them into the agent's
-context.
+**`Stop` continues the turn for actionable events.** When a turn ends with
+one queued, `stop` hands every queued event to the agent as `Stop`
+`additionalContext`, which Claude Code treats as feedback that keeps the
+conversation going, labelled as hook feedback rather than an error. It never
+returns `decision: "block"`, and it continues a turn at most once:
+`stop_hook_active` means it already did, and then it only shows the events.
+Codex and Pi aren't known to honor `Stop` `additionalContext`, so for any
+agent but `claude` it only shows them too. Consuming them there would lose
+them.
 
-`notify.post_tool_use` and `notify.stop_surface` turn either path off, and
+**`wait` wakes an idle session.** Claude Code runs a `Stop` hook marked
+`asyncRewake` in the background, and when it exits 2 its output reaches the
+agent as a system reminder that starts a new turn, even with no user present.
+`pr-tracker hook wait` is that hook. It polls the ledger every 15 seconds,
+two indexed read-only queries, for up to `--for` seconds (keep it under the
+hook's `timeout`, which Claude Code enforces even here). When an actionable
+event arrives it claims every queued event, prints them and exits 2. It
+exits 0 at once for a subagent, for a session with no open PRs, or with
+waking turned off, and stops early when the session's PRs have all closed.
+Each turn's end starts a new waiter, so a session would otherwise collect
+them: a waiter records a token under `waiters/` in the state directory and
+quits when a newer one has replaced it.
+
+**Stop otherwise peeks.** With nothing actionable, it shows unconsumed
+events to the user as a `systemMessage` without consuming them. Marking them
+read there would show them to the user while the agent that owns the PR
+never sees them. Leaving them queued means the next tool call or prompt
+still delivers them into the agent's context.
+
+**Each event is delivered once.** A tool call, a prompt, `stop` and `wait`
+can all run at the same moment, so reading pending events and marking them
+consumed happen in one `BEGIN IMMEDIATE` transaction, and each event goes to
+whichever hook claims it first. The empty case, the common one, never gets
+that far: it is one read-only `SELECT`. The refresh commits after each
+repository, so it never holds the write lock across a network call; before
+that, every hook that tried to deliver during a tick waited out the 3-second
+busy timeout and failed.
+
+`notify.post_tool_use` turns off delivery to the agent, `notify.stop_surface`
+the `systemMessage`, and `notify.wake` both ways of reaching a finished turn,
+and
 `PR_TRACKER_DISABLE=1` turns the whole hook into a no-op.
 
 ## 8. The picker
@@ -615,7 +661,8 @@ Two rules shape it:
 | Two ticks overlap | `flock`; the second exits 0 at once |
 | Database busy | WAL plus a 3-second busy timeout |
 | Hook payload has no session id | Nothing is recorded or delivered |
-| Hook fails for any reason | Exit 0, no output |
+| Hook fails for any reason | Exit 0, no output; undelivered events stay queued |
+| Session idle when an actionable event arrives | `wait` wakes it (Claude Code); otherwise the next tool call or prompt delivers it |
 | PR deleted or access lost | Marked closed on `NOT_FOUND`; retention reaps it |
 | `gh stack view` changes shape | The scan is logged as finding nothing |
 | No session in the environment | The picker opens on every open PR; session commands exit 1 and say so |
@@ -641,7 +688,9 @@ never read a real ledger or reach GitHub, and they can assert on network
 behaviour directly: one query per repo, no call when nothing is open,
 failures that keep stored values and log once, merged PRs no longer polled.
 The hook is tested through its real entry point: offline recording, the JSON
-contract, subagents recording without draining, Stop peeking, exit 0 on bad
+contract, subagents recording without draining, Stop continuing for actionable
+events and peeking otherwise, delivery on prompts, other tools and failed
+commands, `wait` waking, handing over and giving up, exit 0 on bad
 input, a closed stdout, and a broken ledger, agent labels from Claude Code,
 Codex and synthesized Pi payloads, plus a timing check on the common case.
 

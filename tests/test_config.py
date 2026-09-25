@@ -25,6 +25,7 @@ def test_defaults():
         "terminal_ttl_days": 30,
         "post_tool_use": True,
         "stop_surface": True,
+        "wake": True,
         "theme": "auto",
     }
 
@@ -45,6 +46,7 @@ terminal_ttl_days = 7
 [notify]
 post_tool_use = false
 stop_surface = false
+wake = false
 
 [picker]
 theme = "dark"
@@ -59,6 +61,7 @@ theme = "dark"
         "terminal_ttl_days": 7,
         "post_tool_use": False,
         "stop_surface": False,
+        "wake": False,
         "theme": "dark",
     }
 

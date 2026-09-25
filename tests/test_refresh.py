@@ -248,3 +248,36 @@ def test_stack_scan_that_finds_nothing_is_logged(where, fake_gh, tmp_path, capsy
     fake_gh.set(stack_view={os.path.realpath(checkout): {"stdout": json.dumps({"new": []})}})
     refresh.tick(where, CFG, force=True)
     assert "output shape may have changed" in capsys.readouterr().err
+
+
+def test_the_write_lock_is_free_during_network_calls(where, fake_gh, monkeypatch):
+    """A hook delivering events needs the lock; the tick must not sit on it while gh runs."""
+    import sqlite3
+
+    from pr_tracker import github
+
+    record(where, 1)
+    record(where, 2, repo="o/other")
+    fake_gh.set(
+        graphql={
+            "o/r": graphql(pr_node(1)),
+            "o/other": graphql(pr_node(2, repo="o/other")),
+        }
+    )
+    real, free = github.fetch_repo, []
+
+    def fetch(repo, numbers):
+        probe = sqlite3.connect(where.db, timeout=0)
+        try:
+            probe.execute("BEGIN IMMEDIATE")
+            probe.rollback()
+            free.append(repo)
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            probe.close()
+        return real(repo, numbers)
+
+    monkeypatch.setattr(github, "fetch_repo", fetch)
+    assert refresh.tick(where, CFG).refreshed == 2
+    assert sorted(free) == ["o/other", "o/r"]

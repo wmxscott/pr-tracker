@@ -139,6 +139,9 @@ def tick(
                 by_repo.setdefault(row["repo"], []).append(row)
             for repo, prs in by_repo.items():
                 _refresh_repo(conn, repo, prs, now, report)
+                # Never hold the write lock across the next repo's network call:
+                # every hook delivering events needs it too.
+                conn.commit()
             report.reaped = _reap(conn, cfg, now)
             ledger.meta_set(conn, "last_tick_at", now)
             conn.commit()
@@ -283,6 +286,7 @@ def _apply_stack_scans(conn: sqlite3.Connection, now: int) -> None:
             "UPDATE stack_scans SET done_at = ?, found = ? WHERE id = ?",
             (now, found, scan["id"]),
         )
+        conn.commit()
 
 
 def _ingest_stack(conn: sqlite3.Connection, session_id: str, path: str, payload: str) -> int:

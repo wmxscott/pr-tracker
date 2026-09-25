@@ -1,4 +1,4 @@
-"""The hook's contract: always exit 0, print nothing or one JSON object, never touch the network."""
+"""The hook's contract: exit 0 (2 from `wait`), print nothing or one JSON object, no network."""
 
 import io
 import json
@@ -128,16 +128,100 @@ def test_subagents_record_but_never_drain(where):
     assert ledger.drain(where.db, "s", peek=True)
 
 
-def test_stop_shows_without_consuming(where):
-    add_event(where.db, add_pr(where.db, 1))
-    code, out = call(["stop"], {"session_id": "s", "hook_event_name": "Stop"})
+def stop(**extra):
+    return {"session_id": "s", "hook_event_name": "Stop", "stop_hook_active": False, **extra}
+
+
+def test_stop_shows_informational_events_without_consuming(where):
+    add_event(where.db, add_pr(where.db, 1), signature="abc", kind="checks_passed")
+    code, out = call(["stop"], stop())
     assert code == 0
     assert out == {
         "systemMessage": "Tracked pull request updates:\n"
-        "- checks failing: lint (https://github.com/o/r/pull/1)"
+        "- checks_passed: abc (https://github.com/o/r/pull/1)"
     }
-    assert "decision" not in out
     assert ledger.drain(where.db, "s", peek=True)
+
+
+@pytest.mark.parametrize("kind", ["checks_failed", "review_changed"])
+def test_stop_hands_actionable_events_to_the_agent(where, kind):
+    pr_id = add_pr(where.db, 1)
+    add_event(where.db, pr_id, kind=kind)
+    add_event(where.db, pr_id, signature="abc", kind="checks_passed")
+    code, out = call(["stop"], stop())
+    assert code == 0
+    assert "decision" not in out and "systemMessage" not in out
+    assert out["hookSpecificOutput"]["hookEventName"] == "Stop"
+    context = out["hookSpecificOutput"]["additionalContext"]
+    assert context.startswith("Tracked pull request updates:\n")
+    assert "checks_passed" in context
+    assert ledger.drain(where.db, "s", peek=True) == []
+
+
+def test_stop_continues_a_turn_only_once(where):
+    add_event(where.db, add_pr(where.db, 1))
+    _, out = call(["stop"], stop(stop_hook_active=True))
+    assert "systemMessage" in out
+    assert ledger.drain(where.db, "s", peek=True)
+
+
+def test_waking_off_only_shows(where):
+    add_event(where.db, add_pr(where.db, 1))
+    where.config.parent.mkdir(parents=True)
+    where.config.write_text("[notify]\nwake = false\n")
+    _, out = call(["stop"], stop())
+    assert "systemMessage" in out
+    assert ledger.drain(where.db, "s", peek=True)
+
+
+def test_other_agents_only_show_at_stop(where):
+    """Only Claude Code is known to continue a turn on Stop additionalContext."""
+    add_event(where.db, add_pr(where.db, 1))
+    _, out = call(["stop", "--agent", "pi"], stop())
+    assert "systemMessage" in out
+    _, out = call([], stop(turn_id="turn-1"))
+    assert "systemMessage" in out
+    assert ledger.drain(where.db, "s", peek=True)
+
+
+def test_any_tool_call_delivers(where):
+    add_event(where.db, add_pr(where.db, 1))
+    body = {"session_id": "s", "hook_event_name": "PostToolUse", "tool_name": "Agent"}
+    _, out = call(["post-tool"], body)
+    assert "checks failing" in out["hookSpecificOutput"]["additionalContext"]
+    assert call([], {**body, "tool_name": "Read"}) == (0, None)
+
+
+def test_a_prompt_delivers(where):
+    add_event(where.db, add_pr(where.db, 1))
+    body = {"session_id": "s", "hook_event_name": "UserPromptSubmit", "prompt": "hi"}
+    _, out = call([], body)
+    assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "checks failing" in out["hookSpecificOutput"]["additionalContext"]
+    assert ledger.drain(where.db, "s", peek=True) == []
+
+
+def test_a_failed_shell_call_records_and_delivers(where):
+    add_event(where.db, add_pr(where.db, 1))
+    body = payload("git push && gh pr create --fill", hook_event_name="PostToolUseFailure")
+    del body["tool_response"]
+    body["error"] = f"Exit code 1\n{url(7)}\nerror: something after"
+    _, out = call([], body)
+    assert ("o/r", 7) in tracked(where)
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUseFailure"
+
+
+def test_a_locked_ledger_keeps_events_queued(where):
+    add_event(where.db, add_pr(where.db, 1))
+    holder = ledger.connect(where.db)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        assert call(["post-bash"], payload()) == (0, None)
+    finally:
+        holder.rollback()
+        holder.close()
+    _, out = call(["post-bash"], payload())
+    assert "checks failing" in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_notify_settings_silence_delivery(where):
@@ -164,9 +248,12 @@ def test_disabled(where):
         (payload(), "post-bash"),
         (payload(tool_name="shell"), "post-bash"),
         (payload(tool_name="mcp__github__create_pull_request"), "post-mcp"),
-        (payload(tool_name="Read"), None),
+        (payload(tool_name="Read"), "post-tool"),
+        (payload(hook_event_name="PostToolUseFailure"), "post-bash"),
         ({"hook_event_name": "Stop"}, "stop"),
-        ({"hook_event_name": "UserPromptSubmit"}, None),
+        ({"hook_event_name": "UserPromptSubmit"}, "prompt"),
+        ({"hook_event_name": "Notification"}, None),
+        ({"hook_event_name": "PostToolUse"}, None),
     ],
 )
 def test_infer_mode(body, expected):
@@ -370,3 +457,123 @@ def test_the_common_case_is_fast(where):
     for _ in range(3):
         assert run_cli(["post-bash"], body).returncode == 0
     assert (time.monotonic() - start) / 3 < 1.0
+
+
+class Clock:
+    """A fake clock whose sleep advances time and can run a callback."""
+
+    def __init__(self, on_sleep=None):
+        self.now = 0.0
+        self.sleeps = 0
+        self.on_sleep = on_sleep
+
+    def sleep(self, seconds):
+        self.now += seconds
+        self.sleeps += 1
+        if self.on_sleep:
+            self.on_sleep(self.sleeps)
+
+    def __call__(self):
+        return self.now
+
+
+def wait(clock, seconds=60, **extra):
+    body = {"session_id": "s", "hook_event_name": "Stop", **extra}
+    return hook.wait(body, dict(os.environ), seconds, poll=10, sleep=clock.sleep, clock=clock)
+
+
+def test_wait_wakes_on_an_actionable_event(where):
+    pr_id = add_pr(where.db, 1)
+    clock = Clock(lambda n: n == 3 and add_event(where.db, pr_id))
+    text = wait(clock)
+    assert (
+        text
+        == "Tracked pull request updates:\n- checks failing: lint (https://github.com/o/r/pull/1)"
+    )
+    assert clock.sleeps == 3
+    assert ledger.drain(where.db, "s", peek=True) == []
+
+
+def test_wait_ignores_informational_events_and_gives_up(where):
+    add_event(where.db, add_pr(where.db, 1), signature="abc", kind="checks_passed")
+    clock = Clock()
+    assert wait(clock, seconds=60) is None
+    assert clock.now == 60
+    assert ledger.drain(where.db, "s", peek=True)
+    assert not list((where.state / "waiters").iterdir())
+
+
+def test_a_newer_waiter_takes_over(where):
+    add_pr(where.db, 1)
+
+    def supersede(n):
+        for marker in (where.state / "waiters").iterdir():
+            marker.write_text("someone else")
+
+    clock = Clock(supersede)
+    assert wait(clock) is None
+    assert clock.sleeps == 1
+
+
+@pytest.mark.parametrize(
+    "extra", [{"agent_id": "sub-1"}, {"session_id": ""}, {"turn_id": "turn-1"}]
+)
+def test_wait_does_nothing_for_subagents_codex_or_without_a_session(where, extra):
+    add_event(where.db, add_pr(where.db, 1))
+    clock = Clock()
+    assert wait(clock, **extra) is None
+    assert clock.sleeps == 0
+
+
+def test_wait_does_nothing_without_open_prs(where):
+    add_event(where.db, add_pr(where.db, 1, state="merged"))
+    clock = Clock()
+    assert wait(clock) is None
+    assert clock.sleeps == 0
+    assert not where.db.with_name("waiters").exists()
+
+
+def test_wait_stops_when_the_prs_close(where):
+    pr_id = add_pr(where.db, 1)
+
+    def merge(n):
+        conn = ledger.connect(where.db)
+        conn.execute("UPDATE prs SET state = 'merged' WHERE id = ?", (pr_id,))
+        conn.commit()
+        conn.close()
+
+    clock = Clock(merge)
+    assert wait(clock) is None
+    assert clock.sleeps == 1
+
+
+def test_wait_respects_wake_off(where):
+    add_event(where.db, add_pr(where.db, 1))
+    where.config.parent.mkdir(parents=True)
+    where.config.write_text("[notify]\nwake = false\n")
+    assert wait(Clock()) is None
+
+
+def test_wait_cli_exits_2_with_the_events(where):
+    """What Claude Code's asyncRewake needs: exit 2, the message on stdout, nothing on stderr."""
+    add_event(where.db, add_pr(where.db, 1))
+    body = json.dumps({"session_id": "s", "hook_event_name": "Stop"})
+    result = run_cli(["wait", "--for", "0.2"], body)
+    assert result.returncode == 2
+    assert result.stdout.startswith("Tracked pull request updates:\n- checks failing: lint")
+    assert result.stderr == ""
+    result = run_cli(["wait", "--for=0.2"], body)
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    assert run_cli(["wait", "--for", "soon"], body).returncode == 0
+
+
+def test_wait_clears_markers_left_by_killed_waiters(where):
+    add_pr(where.db, 1)
+    waiters = where.state / "waiters"
+    waiters.mkdir(parents=True)
+    stale, fresh = waiters / "stale", waiters / "fresh"
+    stale.write_text("x")
+    fresh.write_text("y")
+    os.utime(stale, (time.time() - 2 * 86400,) * 2)
+    wait(Clock(), seconds=10)
+    assert sorted(p.name for p in waiters.iterdir()) == ["fresh"]
