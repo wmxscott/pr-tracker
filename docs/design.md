@@ -526,15 +526,16 @@ hint is worse than a taller toolbar.
 
 `space` marks rows. `enter` and `y` act on every marked row through fzf's
 `{+2}`, which falls back to the highlighted row when nothing is marked, so
-one binding serves both cases. On a stack header they are contextual:
-`enter` folds the stack, `space` marks every member, and `y` copies every
-URL. A header's id is a group reference, `g:<root id>`, that expands to its
-members wherever a PR id is accepted. fzf has no select-by-predicate, but a
-stack's members are always the rows directly beneath its header, so marking
-one emits `down+select` per member and walks the cursor back. Whether to
-select or deselect checks `FZF_SELECT_COUNT` first: with nothing marked,
-`{+2}` is the header itself, which expands to the whole stack and would
-otherwise look already selected.
+one binding serves both cases. On a stack header they are contextual: `enter`
+folds the stack when nothing is marked, `space` marks every member, and `y`
+copies every URL. Marks always win for `enter`, because marking a stack
+leaves the cursor on its header. A header's id is a group reference,
+`g:<root id>`, that expands to its members wherever a PR id is accepted. fzf
+has no select-by-predicate, but a stack's members are always the rows directly
+beneath its header, so marking one emits `down+select` per member and walks
+the cursor back. Whether to select or deselect checks `FZF_SELECT_COUNT`
+first: with nothing marked, `{+2}` is the header itself, which expands to the
+whole stack and would otherwise look already selected.
 
 Filters apply **in place**. Each key runs a `transform` that updates a
 scratch state file and then emits `reload` plus `transform-header`, so the

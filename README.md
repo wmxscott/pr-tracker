@@ -166,7 +166,7 @@ prs --print              # print the list once, no fzf
 |---|---|
 | `j` / `k` | Move |
 | `space` | Mark a PR, or on a stack's header, the whole stack |
-| `enter` | Open the marked PRs in your browser, or fold a stack |
+| `enter` | Open the marked PRs in your browser, or with none marked, fold a stack |
 | `y` | Copy the marked URLs, or the highlighted one |
 | `s` | Switch between this session's PRs and every tracked PR |
 | `a` | Cycle through open, needs attention, merged or closed, and all |

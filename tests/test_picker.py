@@ -247,6 +247,36 @@ def test_enter_on_a_header_folds(state_path, capsys):
     assert picker.read_state(state_path)["collapsed"] == []
 
 
+def test_enter_on_a_header_opens_the_marks_once_a_stack_is_marked(
+    where, repo_main, state_path, monkeypatch, capsys
+):
+    root = solo(where.db, 1, head_ref="feat-a", base_ref="main")
+    child = solo(where.db, 2, head_ref="feat-b", base_ref="feat-a")
+    opened = []
+    monkeypatch.setattr(picker, "open_urls", opened.extend)
+
+    # space on the header selects the members and walks the cursor back to it
+    picker.act_space(state_path, "s", f"g:{root}", [f"g:{root}"])
+    assert "down+select" in capsys.readouterr().out
+
+    monkeypatch.setenv("FZF_SELECT_COUNT", "2")
+    picker.act_enter(state_path, "s", f"g:{root}", [str(root), str(child)])
+    assert capsys.readouterr().out.strip() == "abort"
+    assert opened == ["https://github.com/o/r/pull/1", "https://github.com/o/r/pull/2"]
+    assert picker.read_state(state_path)["collapsed"] == []
+
+
+def test_enter_on_a_pr_opens_the_marks(where, repo_main, state_path, monkeypatch, capsys):
+    a = solo(where.db, 1)
+    b = solo(where.db, 2)
+    opened = []
+    monkeypatch.setattr(picker, "open_urls", opened.extend)
+    monkeypatch.setenv("FZF_SELECT_COUNT", "1")
+    picker.act_enter(state_path, "s", str(a), [str(b)])
+    assert capsys.readouterr().out.strip() == "abort"
+    assert opened == ["https://github.com/o/r/pull/2"]
+
+
 def test_preview(where, monkeypatch, capsys):
     pr_id = solo(where.db, 1, body="Line one\r\n\r\nLine two", review_state="approved")
     from pr_tracker import ledger
