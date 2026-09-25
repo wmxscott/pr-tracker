@@ -95,7 +95,7 @@ ICO_CLOSED = "\uf4dc"  # nf-oct-git_pull_request_closed
 # reusing the per-check tick made a green PR read "check check 10".
 ICO_ROLLUP_PASS = "\uf14a"  # nf-fa-square_check
 ICO_ROLLUP_FAIL = "\uf2d3"  # nf-fa-window_close (nf-fa-times_rectangle)
-ICO_ROLLUP_WAIT = "\uf0c8"  # nf-fa-square (hollow: no verdict yet)
+ICO_ROLLUP_WAIT = "\uf0c8"  # nf-fa-square (solid, in yellow: no verdict yet)
 
 ICO_PASS = "\uf00c"  # nf-fa-check
 ICO_FAIL = "\uf00d"  # nf-fa-xmark
