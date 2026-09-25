@@ -792,8 +792,11 @@ def reload_actions(state_path):
 
 
 def act_enter(state_path, session_id, current, marked):
-    """enter is contextual: a header folds, a PR opens."""
-    if str(current).startswith("g:"):
+    """enter opens the marked PRs; with none marked, a header folds and a PR opens.
+
+    Marks win because marking a stack leaves the cursor on its header.
+    """
+    if str(current).startswith("g:") and not marked_count():
         state = read_state(state_path)
         root = int(str(current)[2:])
         shut = {int(c) for c in state.get("collapsed", [])}
