@@ -141,19 +141,22 @@ def respond(
         rows = ledger.pending(where.db, session_id)
         if not rows:
             return None
-        # Only Claude Code is known to continue a turn on Stop additionalContext,
-        # and stop_hook_active means this turn already continued once.
-        wake = cfg["wake"] and cfg["post_tool_use"] and agent == "claude"
+        # Claude Code continues a turn on Stop additionalContext, Codex only on a
+        # block decision whose reason becomes the next prompt. stop_hook_active
+        # means this turn already continued once.
+        wake = cfg["wake"] and cfg["post_tool_use"] and agent in ("claude", "codex")
         if wake and not payload.get("stop_hook_active") and any(map(ledger.is_actionable, rows)):
             claimed = ledger.claim(where.db, session_id)
-            if claimed:
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": event,
-                        "additionalContext": _text(claimed),
-                    }
+            if not claimed:
+                return None
+            if agent == "codex":
+                return {"decision": "block", "reason": _text(claimed)}
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": event,
+                    "additionalContext": _text(claimed),
                 }
-            return None
+            }
         if not cfg["stop_surface"]:
             return None
         # Peek, never consume: the next tool call or prompt delivers these into

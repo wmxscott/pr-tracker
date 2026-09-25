@@ -175,12 +175,39 @@ def test_waking_off_only_shows(where):
 
 
 def test_other_agents_only_show_at_stop(where):
-    """Only Claude Code is known to continue a turn on Stop additionalContext."""
+    """Only Claude Code and Codex are known to continue a turn from a Stop hook."""
     add_event(where.db, add_pr(where.db, 1))
     _, out = call(["stop", "--agent", "pi"], stop())
     assert "systemMessage" in out
+    assert ledger.drain(where.db, "s", peek=True)
+
+
+@pytest.mark.parametrize("kind", ["checks_failed", "review_changed"])
+def test_codex_continues_a_turn_through_a_block_decision(where, kind):
+    """Codex continues a turn only on `decision: block`, with `reason` as the next prompt,
+    and rejects any field its Stop output schema doesn't know."""
+    pr_id = add_pr(where.db, 1)
+    add_event(where.db, pr_id, kind=kind)
+    add_event(where.db, pr_id, signature="abc", kind="checks_passed")
     _, out = call([], stop(turn_id="turn-1"))
-    assert "systemMessage" in out
+    assert set(out) == {"decision", "reason"}
+    assert out["decision"] == "block"
+    assert out["reason"].startswith("Tracked pull request updates:\n")
+    assert "checks_passed" in out["reason"]
+    assert ledger.drain(where.db, "s", peek=True) == []
+
+
+def test_codex_continues_a_turn_only_once(where):
+    add_event(where.db, add_pr(where.db, 1))
+    _, out = call([], stop(turn_id="turn-1", stop_hook_active=True))
+    assert set(out) == {"systemMessage"}
+    assert ledger.drain(where.db, "s", peek=True)
+
+
+def test_codex_only_shows_informational_events(where):
+    add_event(where.db, add_pr(where.db, 1), signature="abc", kind="checks_passed")
+    _, out = call([], stop(turn_id="turn-1"))
+    assert set(out) == {"systemMessage"}
     assert ledger.drain(where.db, "s", peek=True)
 
 
@@ -345,7 +372,8 @@ def test_codex_stop_payload_infers_its_mode(where):
         "last_assistant_message": None,
     }
     _, out = call([], body)
-    assert "checks failing" in out["systemMessage"]
+    assert out["decision"] == "block"
+    assert "checks failing" in out["reason"]
 
 
 @pytest.mark.parametrize("args", [["--agent", "other"], ["post-bash", "--agent=other"]])

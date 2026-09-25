@@ -426,12 +426,15 @@ tool call or prompt.
 **`Stop` continues the turn for actionable events.** When a turn ends with
 one queued, `stop` hands every queued event to the agent as `Stop`
 `additionalContext`, which Claude Code treats as feedback that keeps the
-conversation going, labelled as hook feedback rather than an error. It never
-returns `decision: "block"`, and it continues a turn at most once:
-`stop_hook_active` means it already did, and then it only shows the events.
-Codex and Pi aren't known to honor `Stop` `additionalContext`, so for any
-agent but `claude` it only shows them too. Consuming them there would lose
-them.
+conversation going, labelled as hook feedback rather than an error. Codex
+ignores `Stop` `additionalContext` and continues a turn only on
+`decision: "block"`, whose `reason` becomes the next prompt, so for `codex`
+it returns exactly that and nothing else: Codex rejects unknown fields in
+`Stop` output. For Claude Code it never returns `decision: "block"`. Either
+way it continues a turn at most once: `stop_hook_active` means it already
+did, and then it only shows the events. Pi isn't known to continue a turn
+from a hook, so for any other agent it only shows them too. Consuming them
+there would lose them.
 
 **`wait` wakes an idle session.** Claude Code runs a `Stop` hook marked
 `asyncRewake` in the background, and when it exits 2 its output reaches the
