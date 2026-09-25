@@ -93,9 +93,31 @@ def test_list(where, capsys):
     assert [p["number"] for p in json.loads(capsys.readouterr().out)["prs"]] == [1, 2]
 
 
-def test_list_session_scope_needs_a_session(capsys):
+def test_list_session_scope_needs_a_session(where, capsys):
+    add_pr(where.db, 1)
     assert run("list", "--scope", "session") == 1
-    assert "--scope session needs" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--scope session needs a session: pass --session or set one of" in captured.err
+    assert all(var in captured.err for var in cli.SESSION_VARS)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["drain"],
+        ["drain", "--peek"],
+        ["record", "--url", url(1)],
+        ["adopt", url(1)],
+        ["untrack", url(1)],
+    ],
+)
+def test_session_commands_without_a_session_fail_clearly(where, capsys, args):
+    assert run(*args) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("pr-tracker: no session: pass --session or set one of")
+    assert not where.db.exists()
 
 
 def test_session_comes_from_the_environment(where, capsys):
@@ -103,6 +125,75 @@ def test_session_comes_from_the_environment(where, capsys):
     env = {**os.environ, "PR_TRACKER_SESSION_ID": "from-env"}
     assert run("list", "--scope", "session", env=env) == 0
     assert len(json.loads(capsys.readouterr().out)["prs"]) == 1
+
+
+def test_session_var_precedence(where, capsys):
+    assert cli.SESSION_VARS == (
+        "PR_TRACKER_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "PI_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+    )
+    for number, var in enumerate(cli.SESSION_VARS, 1):
+        add_pr(where.db, number, session=var)
+    env = {**os.environ, **{var: var for var in cli.SESSION_VARS}}
+    for number, var in enumerate(cli.SESSION_VARS, 1):
+        assert run("list", "--scope", "session", env=env) == 0
+        assert [p["number"] for p in json.loads(capsys.readouterr().out)["prs"]] == [number]
+        del env[var]
+
+
+def test_an_explicit_session_beats_the_environment(where, capsys):
+    add_pr(where.db, 1, session="flag")
+    add_pr(where.db, 2, session="env")
+    env = {**os.environ, "PR_TRACKER_SESSION_ID": "env", "CODEX_SESSION_ID": "env"}
+    assert run("list", "--scope", "session", "--session", "flag", env=env) == 0
+    assert [p["number"] for p in json.loads(capsys.readouterr().out)["prs"]] == [1]
+
+
+def test_an_empty_variable_is_skipped(where, capsys):
+    add_pr(where.db, 1, session="claude-session")
+    env = {**os.environ, "PR_TRACKER_SESSION_ID": "", "CLAUDE_CODE_SESSION_ID": "claude-session"}
+    assert run("list", "--scope", "session", env=env) == 0
+    assert len(json.loads(capsys.readouterr().out)["prs"]) == 1
+
+
+def session_agents(where):
+    conn = ledger.connect(where.db, readonly=True)
+    try:
+        return dict(conn.execute("SELECT session_id, agent FROM sessions").fetchall())
+    finally:
+        conn.close()
+
+
+def test_record_and_adopt_label_the_agent_from_its_variable(where, fake_gh, capsys):
+    env = {**os.environ, "CODEX_SESSION_ID": "cx"}
+    assert run("record", "--url", url(1), env=env) == 0
+    env = {**os.environ, "PI_SESSION_ID": "pi-1"}
+    assert run("adopt", url(2), env=env) == 0
+    env = {**os.environ, "CLAUDE_CODE_SESSION_ID": "cc"}
+    assert run("record", "--url", url(3), "--agent", "custom", env=env) == 0
+    env = {**os.environ, "PR_TRACKER_SESSION_ID": "own", "CODEX_SESSION_ID": "cx"}
+    assert run("record", "--url", url(4), env=env) == 0
+    assert run("record", "--url", url(5), "--session", "flag", env=env) == 0
+    assert session_agents(where) == {
+        "cx": "codex",
+        "pi-1": "pi",
+        "cc": "custom",
+        "own": "claude",
+        "flag": "claude",
+    }
+
+
+def test_pick_scopes_to_the_environment_session(where, monkeypatch, capsys):
+    add_pr(where.db, 1, session="mine", title="mine", needs_hydrate=0)
+    add_pr(where.db, 2, session="other", title="theirs", needs_hydrate=0)
+    monkeypatch.setenv("PI_SESSION_ID", "mine")
+    assert run("pick", "--print") == 0
+    out = capsys.readouterr().out
+    assert "mine" in out
+    assert "theirs" not in out
 
 
 def test_adopt_by_url(where, fake_gh, capsys):

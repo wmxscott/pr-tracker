@@ -9,6 +9,10 @@ The hook JSON arrives on stdin. When there is something to say, one JSON
 object goes to stdout: `hookSpecificOutput.additionalContext` after a tool
 call, `systemMessage` at the end of a turn. Otherwise stdout stays empty.
 
+The payload is Claude Code's hook JSON, which Codex also sends and adapters
+for other agents synthesize. The README documents the fields read as a stable
+contract.
+
 This runs on every shell call in every session, so it does its work in
 process and makes no network call. The common case, no ledger or nothing
 queued, costs a stat or one indexed query. It never fails the agent: every
@@ -26,6 +30,9 @@ from typing import Any, TextIO
 
 MODES = ("post-bash", "post-mcp", "stop", "auto")
 SHELL_TOOLS = {"bash", "shell", "local_shell", "exec_command", "run_shell_command"}
+# Codex adds these to every turn-scoped hook input, a deliberate departure from
+# Claude Code's schema (codex-rs/hooks/src/schema.rs at rust-v0.156.1).
+CODEX_KEYS = ("turn_id",)
 
 
 def infer_mode(payload: dict[str, Any]) -> str | None:
@@ -44,6 +51,15 @@ def infer_mode(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def infer_agent(payload: dict[str, Any]) -> str:
+    """The agent to label a new session with when `--agent` is not given.
+
+    Codex marks its payloads; Claude Code's are the unmarked baseline. Any
+    other agent's adapter passes `--agent`.
+    """
+    return "codex" if any(key in payload for key in CODEX_KEYS) else "claude"
+
+
 def is_subagent(payload: dict[str, Any]) -> bool:
     """Subagent tool calls must not drain the root session's queue.
 
@@ -54,7 +70,7 @@ def is_subagent(payload: dict[str, Any]) -> bool:
 
 
 def respond(
-    mode: str, payload: dict[str, Any], env: Mapping[str, str], agent: str
+    mode: str, payload: dict[str, Any], env: Mapping[str, str], agent: str | None = None
 ) -> dict[str, Any] | None:
     """Do the hook's work and return the JSON to print, if any."""
     from pr_tracker import paths
@@ -79,6 +95,7 @@ def respond(
         return None
     from pr_tracker import config, ledger
 
+    agent = agent or infer_agent(payload)
     if source:
         urls = parse_pr_urls(tool_output(payload.get("tool_response")))
         ledger.record(where.db, session_id, cwd, source, urls, agent)
@@ -113,8 +130,8 @@ def respond(
     }
 
 
-def parse_args(argv: list[str]) -> tuple[str, str] | None:
-    mode, agent = "auto", "claude"
+def parse_args(argv: list[str]) -> tuple[str, str | None] | None:
+    mode, agent = "auto", None
     args = list(argv)
     while args:
         arg = args.pop(0)
@@ -126,7 +143,7 @@ def parse_args(argv: list[str]) -> tuple[str, str] | None:
             mode = arg
         else:
             return None
-    return mode, agent or "claude"
+    return mode, agent or None
 
 
 def run(
