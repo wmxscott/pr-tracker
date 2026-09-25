@@ -1,11 +1,11 @@
-# Draft formula for wmxscott/homebrew-tap. Fill in url and sha256 once v1.1.0 is tagged:
-#   curl -sL https://github.com/wmxscott/pr-tracker/archive/refs/tags/v1.1.0.tar.gz | shasum -a 256
+# Draft formula for wmxscott/homebrew-tap. Fill in url and sha256 once v1.2.0 is tagged:
+#   curl -sL https://github.com/wmxscott/pr-tracker/archive/refs/tags/v1.2.0.tar.gz | shasum -a 256
 class PrTracker < Formula
   include Language::Python::Virtualenv
 
   desc "Track the pull requests your coding agents open and report check changes"
   homepage "https://github.com/wmxscott/pr-tracker"
-  url "https://github.com/wmxscott/pr-tracker/archive/refs/tags/v1.1.0.tar.gz"
+  url "https://github.com/wmxscott/pr-tracker/archive/refs/tags/v1.2.0.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
   head "https://github.com/wmxscott/pr-tracker.git", branch: "main"
