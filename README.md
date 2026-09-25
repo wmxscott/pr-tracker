@@ -56,7 +56,14 @@ Elsewhere, a cron entry does the same job: `* * * * * $HOME/.local/bin/pr-tracke
 
 ## Agent integration
 
-For Claude Code, install the `pr-tracker@ai-toolkit` plugin from [ai-toolkit](https://github.com/wmxscott/ai-toolkit) once it's published there. It's coming soon; see that repository. The plugin wires up the hooks below, adds a `/prs` command, and teaches the agent to `adopt` PRs the hooks missed.
+For Claude Code, install the `pr-tracker` plugin from [ai-toolkit](https://github.com/wmxscott/ai-toolkit):
+
+```sh
+claude plugin marketplace add wmxscott/ai-toolkit
+claude plugin install pr-tracker@ai-toolkit
+```
+
+The plugin wires up the hooks below, adds a `/prs` command that lists the session's PRs in the conversation, and teaches the agent to `adopt` PRs the hooks missed.
 
 To wire the hooks up yourself, add this to `~/.claude/settings.json`:
 
