@@ -62,16 +62,16 @@ Elsewhere, a cron entry does the same job: `* * * * * $HOME/.local/bin/pr-tracke
 
 ## Agent integration
 
-For Claude Code, install the `pr-tracker` plugin from [ai-toolkit](https://github.com/wmxscott/ai-toolkit):
+pr-tracker works with Claude Code, Codex and Pi. The `pr-tracker@ai-toolkit` plugin from [ai-toolkit](https://github.com/wmxscott/ai-toolkit) wires it into each: it registers the hooks, adds a `/prs` command that lists the session's PRs in the conversation, and teaches the agent to `adopt` PRs the hooks missed. For Claude Code:
 
 ```sh
 claude plugin marketplace add wmxscott/ai-toolkit
 claude plugin install pr-tracker@ai-toolkit
 ```
 
-The plugin wires up the hooks below, adds a `/prs` command that lists the session's PRs in the conversation, and teaches the agent to `adopt` PRs the hooks missed.
+See ai-toolkit for Codex and Pi. Codex's hooks send the same JSON as Claude Code's, plus a few keys of their own, so Codex runs `pr-tracker hook` directly. In Pi, the plugin's extension builds that JSON from Pi's tool events and pipes it to `pr-tracker hook --agent pi`. Any other agent can integrate the same way, through [the hook contract](#the-hook-contract).
 
-To wire the hooks up yourself, add this to `~/.claude/settings.json`:
+To wire the hooks into Claude Code yourself, add this to `~/.claude/settings.json`:
 
 ```json
 {
@@ -97,6 +97,8 @@ To wire the hooks up yourself, add this to `~/.claude/settings.json`:
 
 ### The hook contract
 
+`pr-tracker hook` reads Claude Code's hook JSON. That input is the stable, agent-neutral contract: Codex sends it natively, and an adapter for any other agent builds it and pipes it in.
+
 | Command | Runs after | Does | Prints |
 |---|---|---|---|
 | `pr-tracker hook post-bash` | A shell tool call | Records a PR the command created, then delivers queued events | `{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "..."}}` |
@@ -104,21 +106,58 @@ To wire the hooks up yourself, add this to `~/.claude/settings.json`:
 | `pr-tracker hook stop` | The end of a turn | Shows undelivered events to you, leaving them queued for the agent | `{"systemMessage": "..."}` |
 | `pr-tracker hook` | Any of the above | Picks the mode from the payload's `hook_event_name` and `tool_name` | As above |
 
-- **Input:** the agent's hook JSON on stdin. pr-tracker reads `session_id`, `cwd`, `hook_event_name`, `tool_name`, `tool_input.command` (a string or an argv list), `tool_response` (any shape) and `agent_id`.
-- **Output:** nothing, or exactly one JSON object on stdout when there's something to deliver. Nothing on stderr.
+**Input:** one JSON object on stdin. Every other key is ignored, so a real agent's payload can carry more.
+
+| Field | | Used for |
+|---|---|---|
+| `session_id` | Required | The session to record under and deliver to. Without it, the hook does nothing |
+| `hook_event_name` | Optional | Mode inference: `PostToolUse` or `Stop`. Also echoed as `hookEventName` in the output |
+| `tool_name` | Optional | Mode inference: `Bash`, `shell`, `local_shell`, `exec_command` or `run_shell_command` (any case) is a shell call; a name ending in `create_pull_request` is a GitHub MCP call |
+| `tool_input.command` | Shell calls | The command, as a string or an argv list. Only `gh pr create`, `gh stack submit` and `gh stack push` record anything |
+| `tool_response` | When recording | Any shape. PR URLs are read from every string in it |
+| `cwd` | Optional | Stored with the PR, and where `gh stack view` runs |
+| `agent_id` or `subagent_id` | Optional | Marks a subagent's call: it records but never delivers |
+| `turn_id` | Optional | Marks a Codex payload, for the agent label |
+
+A minimal shell call, as an adapter would send it:
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/path/to/repo",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "bash",
+  "tool_input": { "command": "gh pr create --fill" },
+  "tool_response": { "output": "https://github.com/owner/repo/pull/42" }
+}
+```
+
+At the end of a turn, `{"session_id": "abc123", "hook_event_name": "Stop"}` is enough.
+
+- **Output:** nothing, or exactly one JSON object on stdout when there's something to deliver: `hookSpecificOutput.additionalContext` after a tool call, for the agent's context, or `systemMessage` at `Stop`, for you. Nothing on stderr. An adapter hands `additionalContext` to its agent and shows `systemMessage` to you.
 - **Exit status:** always 0. A bad payload, a locked or broken ledger, a full disk: all of them exit 0 with no output. A PR tracker isn't worth breaking a tool call over.
 - **Speed:** no network, ever. With nothing tracked it costs interpreter startup plus a file check, about 30 ms. The ledger waits at most 3 seconds for a lock, so a 10-second hook timeout is plenty.
-- **Subagents:** a payload with `agent_id` records its PR but never delivers events. Anything delivered there would vanish with the subagent's context.
+- **Subagents:** a payload with `agent_id` or `subagent_id` records its PR but never delivers events. Anything delivered there would vanish with the subagent's context.
 - **Stop never blocks** the turn. It only peeks; the next tool call delivers the events into the agent's context.
-- `--agent NAME` labels new sessions in the ledger. The default is `claude`.
-- `PR_TRACKER_DISABLE=1` turns every hook into a no-op.
+- **`--agent NAME`** labels a new session in the ledger. Without it, the label is inferred: `codex` for a payload with `turn_id`, which Codex adds to every turn's hook input and Claude Code doesn't, else `claude`. Adapters for other agents pass it, like `--agent pi`. It's only a label; it changes nothing else.
+- **`PR_TRACKER_DISABLE=1`** turns every hook into a no-op.
 
-Claude Code is what it's built and tested against. Other agents whose hooks send similar JSON may work with the same commands, and anything else can call `pr-tracker record`, `drain` and `adopt` directly.
+### Sessions outside the hook
+
+Commands that act on a session (`list --scope session`, `adopt`, `record`, `drain`, `untrack`, and the picker) take `--session ID`. Without it, they use the first of these that is set:
+
+1. `PR_TRACKER_SESSION_ID`, an explicit override
+2. `CODEX_SESSION_ID`, which Codex exports to its shell commands
+3. `PI_SESSION_ID`, which Pi exports to its shell commands
+4. `CLAUDE_CODE_SESSION_ID`, which Claude Code exports to its Bash tool, with the parent's id inside a subagent
+5. `CLAUDE_SESSION_ID`, for older integrations
+
+So an agent can run `pr-tracker list --scope session` or `pr-tracker adopt` with no flags. An agent run from inside another inherits the outer one's variable too, so the agents most often run as delegates, like Codex from Claude Code, come first. Set `PR_TRACKER_SESSION_ID` when that order is wrong for you. `adopt` and `record` label a new session with the agent whose variable supplied it. With no session at all, these commands exit 1 and say so; the picker shows every open PR instead.
 
 ## The picker
 
 ```sh
-prs                      # PRs for $PR_TRACKER_SESSION_ID, or every open PR without it
+prs                      # PRs for the session in the environment, or every open PR without one
 prs --session <id>       # PRs for that session
 prs --print              # print the list once, no fzf
 ```
@@ -201,7 +240,7 @@ The file is read on every run, so changes apply straight away. The service's 60-
 | `pr-tracker flush` | Mark pending events delivered without printing them |
 | `pr-tracker init` | Create or upgrade the ledger. Other commands do this when they need to |
 
-Commands that act on a session take `--session ID`. Without it they use `$PR_TRACKER_SESSION_ID`, then `$CLAUDE_SESSION_ID`.
+Commands that act on a session take `--session ID`. Without it, they read it from the environment, as [above](#sessions-outside-the-hook).
 
 ## Files
 
@@ -313,7 +352,7 @@ description = "session PRs"
 - **GitHub.com only**, through `gh`.
 - **Tested on macOS.** CI also runs on Linux. The picker opens URLs with `open` or `xdg-open`, and copies with `pbcopy`, `wl-copy`, `xclip` or `xsel`.
 - **`gh stack view --json`:** pr-tracker reads the shape gh-stack emits today (`branches[].pr.url`). A scan that succeeds but finds no PRs is logged, so a change in that shape shows up instead of silently losing stacks.
-- **Subagent session ids:** a PR opened inside a Claude Code subagent is recorded under the `session_id` its hook payload carries. That's expected to be the parent session's, but it hasn't been confirmed for every agent.
+- **Subagent session ids:** a PR opened inside a subagent is recorded under the `session_id` its hook payload carries. That's expected to be the parent session's, but it hasn't been confirmed for every agent.
 
 ## Development
 

@@ -6,7 +6,23 @@ import os
 import sys
 from collections.abc import Mapping, Sequence
 
-SESSION_VARS = ("PR_TRACKER_SESSION_ID", "CLAUDE_SESSION_ID")
+# The session when --session is absent: the first one set wins. After the explicit
+# override, an agent run inside another also inherits the outer one's variable,
+# so delegates come before Claude Code, the usual host. CLAUDE_SESSION_ID is legacy.
+SESSION_VARS = (
+    "PR_TRACKER_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "PI_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_SESSION_ID",
+)
+SESSION_VAR_AGENTS = {
+    "CODEX_SESSION_ID": "codex",
+    "PI_SESSION_ID": "pi",
+    "CLAUDE_CODE_SESSION_ID": "claude",
+    "CLAUDE_SESSION_ID": "claude",
+}
+NO_SESSION = "pass --session or set one of " + ", ".join(SESSION_VARS)
 
 
 def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> int:
@@ -34,7 +50,7 @@ def _main(argv: list[str], env: Mapping[str, str]) -> int:
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     def session_arg(p: argparse.ArgumentParser, help: str) -> None:
-        p.add_argument("--session", help=f"{help} (default: $PR_TRACKER_SESSION_ID)")
+        p.add_argument("--session", help=f"{help} (default: from the environment)")
 
     p = sub.add_parser("status", help="show the ledger, the last refresh and any problems")
     p.set_defaults(func=cmd_status)
@@ -74,13 +90,17 @@ def _main(argv: list[str], env: Mapping[str, str]) -> int:
         help="agent hook entry point: post-bash, post-mcp or stop, reading hook JSON on stdin",
     )
     p.add_argument("mode", nargs="?", choices=["post-bash", "post-mcp", "stop", "auto"])
-    p.add_argument("--agent", help="agent name recorded with new sessions (default: claude)")
+    p.add_argument(
+        "--agent", help="agent name recorded with new sessions (default: codex or claude, inferred)"
+    )
 
     p = sub.add_parser("record", help="attach PR URLs to a session, for custom integrations")
     session_arg(p, "the session to attach them to")
     p.add_argument("--cwd", help="the checkout the PRs came from")
     p.add_argument("--source", default="gh", choices=["gh", "stack", "mcp", "adopt"])
-    p.add_argument("--agent", default="claude")
+    p.add_argument(
+        "--agent", help="agent name recorded with a new session (default: from the environment)"
+    )
     p.add_argument("--text", help="text to find PR URLs in; '-' reads stdin")
     p.add_argument("--url", action="append", default=[], help="a PR URL; repeatable")
     p.set_defaults(func=cmd_record)
@@ -108,19 +128,32 @@ def _err(message: str) -> None:
     print(f"pr-tracker: {message}", file=sys.stderr)
 
 
+def env_session(env: Mapping[str, str]) -> tuple[str, str | None]:
+    """The session from the first of SESSION_VARS that is set, and the agent it implies."""
+    for var in SESSION_VARS:
+        if env.get(var):
+            return env[var], SESSION_VAR_AGENTS.get(var)
+    return "", None
+
+
 def _session(args, env: Mapping[str, str]) -> str:
     if getattr(args, "session", None):
         return args.session
-    for var in SESSION_VARS:
-        if env.get(var):
-            return env[var]
-    return ""
+    return env_session(env)[0]
+
+
+def _agent(args, env: Mapping[str, str]) -> str:
+    """`--agent`, else the agent whose variable supplied the session, else claude."""
+    if getattr(args, "agent", None):
+        return args.agent
+    implied = None if getattr(args, "session", None) else env_session(env)[1]
+    return implied or "claude"
 
 
 def _require_session(args, env: Mapping[str, str]) -> str | None:
     session = _session(args, env)
     if not session:
-        _err("no session: pass --session or set PR_TRACKER_SESSION_ID")
+        _err(f"no session: {NO_SESSION}")
         return None
     return session
 
@@ -155,7 +188,7 @@ def cmd_record(args, env) -> int:
         args.cwd or os.getcwd(),
         args.source,
         urls,
-        args.agent,
+        _agent(args, env),
     )
     for repo, number, _ in urls:
         print(f"tracking {repo}#{number}")
@@ -189,7 +222,7 @@ def cmd_adopt(args, env) -> int:
     if not urls:
         _err("nothing to adopt")
         return 1
-    ledger.record(paths.resolve(env).db, session, cwd, "adopt", urls)
+    ledger.record(paths.resolve(env).db, session, cwd, "adopt", urls, _agent(args, env))
     for repo, number, _ in urls:
         print(f"tracking {repo}#{number}")
     return 0
@@ -241,7 +274,7 @@ def cmd_list(args, env) -> int:
 
     session = _session(args, env)
     if args.scope == "session" and not session:
-        _err("--scope session needs --session or PR_TRACKER_SESSION_ID")
+        _err(f"--scope session needs a session: {NO_SESSION}")
         return 1
     where = paths.resolve(env)
     cfg = config.load(where.config)

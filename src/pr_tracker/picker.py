@@ -17,8 +17,9 @@ The list has focus by default: search starts disabled so j/k scroll. `/`
 hands the keyboard to the query input, where j and k are just letters again,
 and esc hands it back.
 
-The session comes from `--session` or PR_TRACKER_SESSION_ID. A launcher that
-opens the picker in a popup should resolve it before the popup takes focus.
+The session comes from `--session`, else the environment: PR_TRACKER_SESSION_ID,
+then the agents' own variables (see `cli.SESSION_VARS`). A launcher that opens
+the picker in a popup should resolve it before the popup takes focus.
 """
 
 from __future__ import annotations
@@ -1056,7 +1057,7 @@ def build_parser(prog="prs"):
     )
     parser.add_argument(
         "--session",
-        help="start scoped to this agent session (default: $PR_TRACKER_SESSION_ID)",
+        help="start scoped to this agent session (default: from the environment)",
     )
     parser.add_argument(
         "--print",
@@ -1077,7 +1078,9 @@ def main(argv=None):
 
 
 def run(session=None, print_rows=False):
-    session_id = session or os.environ.get("PR_TRACKER_SESSION_ID") or ""
+    from pr_tracker.cli import env_session
+
+    session_id = session or env_session(os.environ)[0]
     problem = None if print_rows else check_fzf()
     if problem:
         print(f"prs: {problem}; printing the list instead", file=sys.stderr)

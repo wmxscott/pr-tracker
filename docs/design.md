@@ -1,6 +1,6 @@
 # pr-tracker design
 
-This describes pr-tracker 1.0: why it exists, how the pieces fit, and the
+This describes pr-tracker 1.1: why it exists, how the pieces fit, and the
 trade-offs behind them. The [README](../README.md) covers installing and using
 it; this is the reasoning underneath.
 
@@ -26,7 +26,7 @@ the default one when the picker is opened from inside a session.
 | Question | Decision |
 |---|---|
 | Store scope | One ledger across sessions; the session is a filter, not the schema's root |
-| Agents | Built and tested against Claude Code; the hook reads generic hook JSON, and `record` / `drain` / `adopt` are plain CLI commands other integrations can call |
+| Agents | Claude Code and Codex send the hook JSON natively; Pi, through an extension that synthesizes it (§5.4). `record` / `drain` / `adopt` are plain CLI commands anything else can call |
 | Session binding | The agent's session id; a nullable parent column is reserved for forks (§3.2) |
 | Capture | `gh pr create`, `gh stack submit` / `push`, GitHub MCP `create_pull_request`, and manual `adopt` |
 | Stacks | Inferred from base/head branch chains; `gh stack view --json` ordering wins when present |
@@ -90,7 +90,7 @@ The hot path is trimmed further:
 Claude Code keeps a session's id across `--resume`, so resuming needs no
 chain-following. Forks and compacted sessions get a new id, and the hook
 payload carries no pointer to the parent. `sessions.parent_session_id` exists
-for that case, but 1.0 never fills it: we do not build a lineage tree we
+for that case, but 1.x never fills it: we do not build a lineage tree we
 cannot populate.
 
 `session_prs` is many-to-many, so a PR adopted by a second session shows in
@@ -147,8 +147,8 @@ CREATE TABLE pr_checks (                       -- feeds the preview and the fail
 
 CREATE TABLE sessions (
   session_id        TEXT PRIMARY KEY,
-  parent_session_id TEXT,                      -- reserved; NULL in 1.0
-  agent             TEXT NOT NULL DEFAULT 'claude',   -- from `hook --agent`
+  parent_session_id TEXT,                      -- reserved; NULL in 1.x
+  agent             TEXT NOT NULL DEFAULT 'claude',   -- `--agent`, else inferred (§5.4)
   cwd               TEXT,
   first_seen_at     INTEGER NOT NULL
 );
@@ -213,9 +213,10 @@ With no mode, it infers one from the payload's `hook_event_name` and
 delivers. Two separate hooks, each opening the database on every shell call,
 is the cost this avoids.
 
-The [`pr-tracker@ai-toolkit`](https://github.com/wmxscott/ai-toolkit) Claude
-Code plugin registers these hooks, adds a `/prs` command, and teaches the
-agent when to `adopt`. The README shows the same hooks wired by hand.
+The [`pr-tracker@ai-toolkit`](https://github.com/wmxscott/ai-toolkit) plugin
+registers these hooks in Claude Code, Codex and Pi, adds a `/prs` command, and
+teaches the agent when to `adopt`. The README shows the Claude Code hooks wired
+by hand.
 
 **Recording is gated on the command, not on the URL.** A PR URL in the output
 of `gh pr view`, `gh pr list` or a `grep` must not create a row. A row is
@@ -275,8 +276,54 @@ checkout, so unlike the hook it does touch the network.
 
 `pr-tracker record`, `drain` and `untrack` expose the rest of the ledger to
 integrations the hook doesn't cover. Commands that act on a session take
-`--session`, falling back to `$PR_TRACKER_SESSION_ID`, then
-`$CLAUDE_SESSION_ID`.
+`--session`, else read it from the environment (§5.4), and exit 1 naming the
+variables they tried when there is none. An empty `list --scope session` would
+read as "this session has no PRs", which is a different and wrong answer.
+
+### 5.4 Other agents
+
+**The hook input is the contract.** It is Claude Code's hook JSON, cut down to
+the fields pr-tracker reads: `session_id`, `hook_event_name`, `tool_name`,
+`tool_input.command`, `tool_response`, `cwd`, and `agent_id` / `subagent_id`.
+The README lists them with their meanings. The output is fixed too:
+`hookSpecificOutput.additionalContext` after a tool call, `systemMessage` at
+`Stop`, and exit 0 whatever happens. An agent whose hooks already speak this
+needs no adapter. Codex's do; its turn-scoped hook inputs are Claude Code's
+plus a few keys (`codex-rs/hooks/src/schema.rs` at `rust-v0.156.1`). For Pi,
+the ai-toolkit plugin's extension builds the JSON from Pi's tool events, pipes
+it to `pr-tracker hook --agent pi`, and hands the output back. Keeping the
+adapters outside pr-tracker keeps one input shape here, however many agents
+there are.
+
+**The agent label is inferred when it isn't given.** The payload doesn't name
+its agent, and a hook config shared by Claude Code and Codex can't pass a
+different `--agent` to each. Codex adds `turn_id` to every turn-scoped hook
+input, and its own schema test calls this a deliberate departure from Claude's
+hook docs, so a payload with `turn_id` is labelled `codex`. Everything else is
+`claude`, the unmarked baseline, and any other adapter passes `--agent`. The
+label is recorded once, when a session is first seen, and changes nothing but
+what the ledger says.
+
+**Outside the hook, the session comes from the environment.** Each agent
+exports its session id to the shell commands it runs, so an agent can call
+`pr-tracker list --scope session` or `adopt` with no flag. The first variable
+set wins:
+
+1. `PR_TRACKER_SESSION_ID`, an explicit override, and what a launcher sets
+   (§9).
+2. `CODEX_SESSION_ID`: Codex's root session id, the one its hook payloads
+   carry.
+3. `PI_SESSION_ID`.
+4. `CLAUDE_CODE_SESSION_ID`: inside a subagent, the parent's id, matching
+   what its hooks record under.
+5. `CLAUDE_SESSION_ID`, kept for integrations written against 1.0.
+
+The order handles nesting. An agent run from inside another inherits the
+outer agent's variable alongside its own, and no variable says which is
+innermost. So the agents most often run as delegates, like Codex from a
+Claude Code plugin, come before Claude Code, the usual host. When that guess
+is wrong, `PR_TRACKER_SESSION_ID` settles it. `adopt` and `record` also label a
+new session with the agent whose variable supplied it.
 
 ## 6. Refresh
 
@@ -570,7 +617,7 @@ Two rules shape it:
 | Hook fails for any reason | Exit 0, no output |
 | PR deleted or access lost | Marked closed on `NOT_FOUND`; retention reaps it |
 | `gh stack view` changes shape | The scan is logged as finding nothing |
-| No session in the environment | The picker opens on every open PR |
+| No session in the environment | The picker opens on every open PR; session commands exit 1 and say so |
 | fzf missing or older than 0.59 | `prs` prints the list instead |
 
 ## 12. Testing
@@ -594,13 +641,13 @@ behaviour directly: one query per repo, no call when nothing is open,
 failures that keep stored values and log once, merged PRs no longer polled.
 The hook is tested through its real entry point: offline recording, the JSON
 contract, subagents recording without draining, Stop peeking, exit 0 on bad
-input, a closed stdout, and a broken ledger, plus a timing check on the
-common case.
+input, a closed stdout, and a broken ledger, agent labels from Claude Code,
+Codex and synthesized Pi payloads, plus a timing check on the common case.
 
 ## 13. Out of scope
 
-- Adapters for agents other than Claude Code beyond the generic hook and
-  CLI.
+- Agent adapters. They live in ai-toolkit and speak the hook contract
+  (§5.4); pr-tracker only reads it.
 - Forges other than GitHub.com.
 - Human-facing notifications on PR changes (pull only, by decision).
 - Changing PRs from the picker: merging, closing, re-running checks.

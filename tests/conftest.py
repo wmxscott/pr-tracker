@@ -10,15 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from pr_tracker import ledger, paths
+from pr_tracker import cli, ledger, paths
 
 SCRUBBED = (
+    *cli.SESSION_VARS,
     "PR_TRACKER_CONFIG",
     "PR_TRACKER_STATE_DIR",
-    "PR_TRACKER_SESSION_ID",
     "PR_TRACKER_DISABLE",
     "PR_TRACKER_THEME",
-    "CLAUDE_SESSION_ID",
     "FZF_COLUMNS",
     "FZF_PREVIEW_COLUMNS",
     "FZF_INPUT_STATE",

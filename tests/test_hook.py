@@ -188,6 +188,113 @@ def test_argv_list_commands(where):
     conn.close()
 
 
+def agent_of(where, session="s"):
+    conn = ledger.connect(where.db, readonly=True)
+    try:
+        row = conn.execute("SELECT agent FROM sessions WHERE session_id = ?", (session,))
+        return row.fetchone()["agent"]
+    finally:
+        conn.close()
+
+
+def claude_payload(command="ls", stdout="", session="s", **extra):
+    """Claude Code's PostToolUse input, as documented."""
+    return payload(
+        command,
+        stdout,
+        session,
+        transcript_path="/t.jsonl",
+        permission_mode="default",
+        tool_use_id="toolu_1",
+        **extra,
+    )
+
+
+def codex_payload(command="ls", stdout="", session="s", **extra):
+    """Codex's PostToolUse input: codex-rs/hooks/src/schema.rs at rust-v0.156.1."""
+    return payload(
+        command,
+        stdout,
+        session,
+        turn_id="turn-1",
+        transcript_path=None,
+        model="gpt-test",
+        permission_mode="default",
+        tool_use_id="call_1",
+        tool_response=stdout,
+        **extra,
+    )
+
+
+def pi_payload(command="ls", stdout="", session="s", event="PostToolUse"):
+    """What a Pi extension synthesizes: the documented fields and nothing else."""
+    body = {"session_id": session, "cwd": "/work", "hook_event_name": event}
+    if event == "PostToolUse":
+        body |= {
+            "tool_name": "bash",
+            "tool_input": {"command": command},
+            "tool_response": {"output": stdout},
+        }
+    return body
+
+
+def test_codex_payloads_are_labelled_codex(where):
+    call([], codex_payload("gh pr create --fill", url(1)))
+    assert tracked(where) == [("o/r", 1)]
+    assert agent_of(where) == "codex"
+
+
+def test_codex_stop_payload_infers_its_mode(where):
+    add_event(where.db, add_pr(where.db, 1))
+    body = {
+        "session_id": "s",
+        "turn_id": "turn-1",
+        "transcript_path": None,
+        "cwd": "/work",
+        "hook_event_name": "Stop",
+        "model": "gpt-test",
+        "permission_mode": "default",
+        "stop_hook_active": False,
+        "last_assistant_message": None,
+    }
+    _, out = call([], body)
+    assert "checks failing" in out["systemMessage"]
+
+
+@pytest.mark.parametrize("args", [["--agent", "other"], ["post-bash", "--agent=other"]])
+def test_an_explicit_agent_beats_inference(where, args):
+    call(args, codex_payload("gh pr create", url(1)))
+    assert agent_of(where) == "other"
+
+
+def test_claude_payloads_are_labelled_claude(where):
+    call(["post-bash"], claude_payload("gh pr create", url(1)))
+    call([], claude_payload("gh pr create", url(2), session="sub", agent_id="a1"))
+    assert agent_of(where) == "claude"
+    assert agent_of(where, "sub") == "claude"
+
+
+def test_the_label_is_set_once_per_session(where):
+    call([], claude_payload("gh pr create", url(1)))
+    call([], codex_payload("gh pr create", url(2)))
+    assert agent_of(where) == "claude"
+
+
+def test_a_synthesized_pi_payload(where):
+    """Through the real entry point, as a Pi extension would run it."""
+    result = run_cli(["--agent", "pi"], json.dumps(pi_payload("gh pr create", url(3))))
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    assert tracked(where) == [("o/r", 3)]
+    assert agent_of(where) == "pi"
+
+    add_event(where.db, add_pr(where.db, 3))
+    result = run_cli(["--agent", "pi"], json.dumps(pi_payload(event="Stop")))
+    assert "checks failing" in json.loads(result.stdout)["systemMessage"]
+    result = run_cli(["--agent", "pi"], json.dumps(pi_payload()))
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert context.startswith("Tracked pull request updates:")
+
+
 @pytest.mark.parametrize(
     "stdin",
     [
