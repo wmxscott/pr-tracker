@@ -156,6 +156,15 @@ def _refresh_repo(
     report.repos += 1
     data, error = github.fetch_repo(repo, [p["number"] for p in prs])
     key = f"failing:{repo}"
+    if data is not None and data.repo_missing:
+        # GitHub also says NOT_FOUND after losing access, so a PR it has
+        # returned before is kept, and the repo counts as failing.
+        for stored in prs:
+            if stored["needs_hydrate"]:
+                _forget(conn, repo, stored)
+        if not any(p["needs_hydrate"] == 0 for p in prs):
+            return
+        data, error = None, f"Could not resolve to a Repository with the name '{repo}'."
     if data is None:
         # Keep the stored values and their last_refreshed_at, so the picker
         # can show them as stale. Log only the change, not every tick.
@@ -179,6 +188,8 @@ def _refresh_repo(
             fresh, checks = github.row_from_node(node)
             report.events += _write_refresh(conn, stored, fresh, checks, now)
             report.refreshed += 1
+        elif stored["number"] in data.missing and stored["needs_hydrate"]:
+            _forget(conn, repo, stored)
         elif stored["number"] in data.missing:
             # Deleted, or moved somewhere we cannot see. Retire it quietly so
             # it stops being asked for and the TTL reaps it.
@@ -188,6 +199,12 @@ def _refresh_repo(
                 " terminal_at = COALESCE(terminal_at, ?) WHERE id = ?",
                 (now, stored["id"]),
             )
+
+
+def _forget(conn: sqlite3.Connection, repo: str, stored: sqlite3.Row) -> None:
+    """Drop a PR GitHub has never returned: a URL the hook scraped that was never a real PR."""
+    log(f"{repo}#{stored['number']}: not on GitHub; forgotten")
+    conn.execute("DELETE FROM prs WHERE id = ?", (stored["id"],))
 
 
 def _write_refresh(

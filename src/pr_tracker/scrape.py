@@ -9,10 +9,17 @@ from typing import Any
 
 PR_URL_RE = re.compile(r"https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/(\d+)")
 
-# Commands that mean "a PR was just created". A PR URL merely printed by
-# `gh pr view` or `gh pr list` must never create a row.
-CREATE_RE = re.compile(r"\bgh\s+pr\s+create\b")
-STACK_RE = re.compile(r"\bgh\s+stack\s+(submit|push)\b")
+# Commands that mean "a PR was just created", only where a command starts:
+# after a separator, env assignments or a wrapper. A PR URL printed by
+# `gh pr view`, or by any command that merely mentions `gh pr create`, such as
+# a grep or a test fixture, must never create a row.
+_START = (
+    r"(?:^|[;&|(\n`])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"(?:(?:env|command|exec|time|nohup|rtk)\s+)*"
+)
+CREATE_RE = re.compile(_START + r"gh\s+pr\s+create\b")
+STACK_RE = re.compile(_START + r"gh\s+stack\s+(submit|push)\b")
+HEREDOC_RE = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 
 # GitHub MCP servers name the tool `create_pull_request`; agents prefix it
 # with the server name, as in `mcp__github__create_pull_request`.
@@ -40,12 +47,73 @@ def command_text(command: Any) -> str:
     return ""
 
 
+def _code(text: str, i: int = 0, nested: bool = False) -> tuple[str, int]:
+    """`text` from `i` with quoted strings, heredoc bodies and comments blanked out.
+
+    What `$(...)` runs inside double quotes is kept, as `url="$(gh pr create)"`
+    runs gh. With `nested`, stops after the `)` that closes the substitution.
+    """
+    out: list[str] = []
+    heredocs: list[tuple[bool, str]] = []
+    depth, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            out.append(" ")
+            i += 2
+        elif c == "'":
+            end = text.find("'", i + 1)
+            out.append(" ")
+            i = n if end < 0 else end + 1
+        elif c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\":
+                    i += 2
+                elif text.startswith("$(", i):
+                    inner, i = _code(text, i + 2, nested=True)
+                    out.append(f" $({inner}) ")
+                else:
+                    i += 1
+            out.append(" ")
+            i += 1
+        elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|("):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif match := HEREDOC_RE.match(text, i):
+            heredocs.append((match[1] == "-", match[3]))
+            out.append(" ")
+            i = match.end()
+        elif c == "\n" and heredocs:
+            out.append("\n")
+            i += 1
+            for strip, word in heredocs:
+                while i < n:
+                    end = text.find("\n", i)
+                    line = text[i : n if end < 0 else end]
+                    i = n if end < 0 else end + 1
+                    if (line.lstrip("\t") if strip else line) == word:
+                        break
+            heredocs = []
+        elif c == ")" and nested and depth == 0:
+            return "".join(out), i + 1
+        else:
+            depth += (c == "(") - (c == ")")
+            out.append(c)
+            i += 1
+    return "".join(out), i
+
+
 def command_source(command: Any) -> str | None:
     """'gh' | 'stack' | None: what kind of creation this command was, if any."""
-    text = command_text(command)
-    if STACK_RE.search(text):
+    # An argv list may carry the script as one argument, as in `bash -lc "..."`.
+    texts = [command_text(command)]
+    if isinstance(command, list):
+        texts += [str(part) for part in command]
+    code = "\n".join(_code(text)[0] for text in texts)
+    if STACK_RE.search(code):
         return "stack"
-    if CREATE_RE.search(text):
+    if CREATE_RE.search(code):
         return "gh"
     return None
 

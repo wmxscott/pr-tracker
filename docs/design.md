@@ -227,12 +227,22 @@ by hand.
 
 **Recording is gated on the command, not on the URL.** A PR URL in the output
 of `gh pr view`, `gh pr list` or a `grep` must not create a row. A row is
-created only when the command matches `gh pr create`, `gh stack submit` or
+created only when the command runs `gh pr create`, `gh stack submit` or
 `gh stack push`, and then for every distinct
 `https://github.com/<owner>/<repo>/pull/<n>` URL in the output. `gh stack`
 prints several at once; all are recorded. The command may arrive as a string
 or an argv list, and the output is taken from every string anywhere in the
 tool response, so the shape of an agent's response doesn't matter.
+
+"Runs" means in command position: at the start, after `;`, `&&`, `||`, `|`,
+`(`, `$(` or a newline, optionally after env assignments or a wrapper such as
+`env` or `rtk`. Quoted strings, heredoc bodies and comments are blanked out
+first, keeping what `$(...)` runs inside double quotes. So
+`grep -rn "gh pr create"`, a JSON payload piped into `pr-tracker hook`, or a
+heredoc writing a test fixture records nothing, while
+`gh pr create --body "$(cat <<'EOF' ...)"` still does. Agents run exactly
+those commands while working on code that mentions `gh pr create`, and
+before this every fixture URL they printed became a tracked PR.
 
 **MCP responses** carry the new PR's body, and a body that mentions another
 PR must not record that one too. So the PR's own `html_url` / `url` field
@@ -376,6 +386,12 @@ currently failing.
 A PR GitHub reports as `NOT_FOUND` (deleted, or access lost) doesn't fail its
 repo. gh exits non-zero, but the rest of the response is still used, and that
 PR is marked closed so it stops being asked for and retention reaps it.
+
+A PR GitHub has never returned, one still waiting for its first refresh, is
+forgotten instead when it comes back `NOT_FOUND`, with its repo or on its
+own: it was a URL the hook scraped that was never a real PR. A repo GitHub
+can't resolve forgets those PRs, and fails as before only if it has PRs
+GitHub did return once, since `NOT_FOUND` also means access was lost.
 
 Check runs are named `Workflow / job`, since a bare job name like `Deploy`
 repeats across workflows and says nothing about which one failed. Status
@@ -670,6 +686,7 @@ Two rules shape it:
 | Hook fails for any reason | Exit 0, no output; undelivered events stay queued |
 | Session idle when an actionable event arrives | `wait` wakes it (Claude Code); otherwise the next tool call or prompt delivers it |
 | PR deleted or access lost | Marked closed on `NOT_FOUND`; retention reaps it |
+| Recorded PR or repo never existed | Forgotten on its first refresh's `NOT_FOUND` |
 | `gh stack view` changes shape | The scan is logged as finding nothing |
 | No session in the environment | The picker opens on every open PR; session commands exit 1 and say so |
 | fzf missing or older than 0.59 | `prs` prints the list instead |

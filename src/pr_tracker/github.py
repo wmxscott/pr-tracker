@@ -70,6 +70,7 @@ class RepoData:
     default_branch: str | None
     nodes: dict[int, dict]
     missing: set[int]
+    repo_missing: bool = False
 
 
 def _not_found(errors: Any) -> set[int]:
@@ -86,6 +87,15 @@ def _not_found(errors: Any) -> set[int]:
     return missing
 
 
+def _repo_not_found(errors: Any) -> bool:
+    return any(
+        isinstance(error, dict)
+        and error.get("type") == "NOT_FOUND"
+        and error.get("path") == ["repository"]
+        for error in (errors if isinstance(errors, list) else [])
+    )
+
+
 def fetch_repo(repo: str, numbers: list[int]) -> tuple[RepoData | None, str]:
     """Batched GraphQL queries for the given PRs in one repo.
 
@@ -93,6 +103,7 @@ def fetch_repo(repo: str, numbers: list[int]) -> tuple[RepoData | None, str]:
     phase. Returns (None, error) when nothing usable came back, and the caller
     keeps the stored values. A PR that no longer exists makes gh exit non-zero
     but still returns the rest, so a partial response is used, not discarded.
+    A repo GitHub can't resolve comes back as `repo_missing`, every PR missing.
     """
     owner, name = repo.split("/", 1)
     data = RepoData(None, {}, set())
@@ -110,11 +121,15 @@ def fetch_repo(repo: str, numbers: list[int]) -> tuple[RepoData | None, str]:
                 f"name={name}",
             ]
         )
+        payload = None
         try:
             payload = json.loads(result.out)
             repository = payload["data"]["repository"]
         except (ValueError, KeyError, TypeError):
             repository = None
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+        if repository is None and _repo_not_found(errors):
+            return RepoData(None, {}, set(numbers), repo_missing=True), ""
         if not isinstance(repository, dict):
             error = (result.err or result.out).strip().splitlines()
             return None, (error[0] if error else f"gh exited {result.code}")

@@ -133,6 +133,8 @@ def test_without_gh_on_path(where, fake_gh, monkeypatch, capsys):
 
 def test_a_deleted_pr_does_not_block_its_repo(where, fake_gh):
     record(where, 1, 2)
+    fake_gh.set(graphql={"o/r": graphql(pr_node(1), pr_node(2))})
+    refresh.tick(where, CFG, force=True)
     errors = [
         {
             "type": "NOT_FOUND",
@@ -281,3 +283,64 @@ def test_the_write_lock_is_free_during_network_calls(where, fake_gh, monkeypatch
     monkeypatch.setattr(github, "fetch_repo", fetch)
     assert refresh.tick(where, CFG).refreshed == 2
     assert sorted(free) == ["o/other", "o/r"]
+
+
+def sessions_of(db, number):
+    conn = ledger.connect(db, readonly=True)
+    try:
+        return conn.execute(
+            "SELECT sp.session_id FROM session_prs sp JOIN prs p ON p.id = sp.pr_id"
+            " WHERE p.number = ?",
+            (number,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_a_pr_never_found_on_github_is_forgotten(where, fake_gh, capsys):
+    """A URL the hook scraped from output that wasn't a real PR, like a test fixture."""
+    record(where, 1, 2)
+    errors = [{"type": "NOT_FOUND", "path": ["repository", "p2"], "message": "no PR 2"}]
+    body = graphql(pr_node(1), errors=errors)
+    body["stdout"]["data"]["repository"]["p2"] = None
+    fake_gh.set(graphql={"o/r": body})
+    refresh.tick(where, CFG, force=True)
+    assert set(rows(where.db)) == {1}
+    assert sessions_of(where.db, 2) == []
+    assert "o/r#2: not on GitHub; forgotten" in capsys.readouterr().err
+
+
+REPO_NOT_FOUND = {
+    "code": 1,
+    "stdout": {
+        "data": {"repository": None},
+        "errors": [
+            {
+                "type": "NOT_FOUND",
+                "path": ["repository"],
+                "message": "Could not resolve to a Repository with the name 'owner/repo'.",
+            }
+        ],
+    },
+    "stderr": "gh: Could not resolve to a Repository with the name 'owner/repo'.",
+}
+
+
+def test_a_repo_never_found_on_github_forgets_its_prs(where, fake_gh):
+    record(where, 7, repo="owner/repo")
+    fake_gh.set(graphql={"owner/repo": REPO_NOT_FOUND})
+    report = refresh.tick(where, CFG, force=True)
+    assert report.failed == []
+    assert rows(where.db) == {}
+
+
+def test_a_repo_that_vanishes_keeps_prs_it_has_seen(where, fake_gh):
+    """NOT_FOUND also means lost access, so a PR GitHub once returned is never forgotten."""
+    record(where, 7, repo="owner/repo")
+    fake_gh.set(graphql={"owner/repo": graphql(pr_node(7, repo="owner/repo"))})
+    refresh.tick(where, CFG, force=True)
+    record(where, 8, repo="owner/repo")
+    fake_gh.set(graphql={"owner/repo": REPO_NOT_FOUND})
+    report = refresh.tick(where, CFG, force=True)
+    assert report.failed == ["owner/repo"]
+    assert set(rows(where.db)) == {7}

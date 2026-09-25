@@ -16,7 +16,7 @@ They answer "which PRs exist?". pr-tracker answers "what did *this session* open
 
 ## How it works
 
-1. **Record.** An agent hook runs `pr-tracker hook` after every tool call. When the command was `gh pr create`, `gh stack submit` or `gh stack push`, it takes the PR URL from the output and writes a row. A URL that `gh pr view` or `gh pr list` merely printed is never recorded. Recording is offline: no network, no `gh`, a few milliseconds.
+1. **Record.** An agent hook runs `pr-tracker hook` after every tool call. When the command ran `gh pr create`, `gh stack submit` or `gh stack push`, it takes the PR URL from the output and writes a row. A URL that `gh pr view` or `gh pr list` printed is never recorded, and neither is one printed by a command that only mentions `gh pr create` in a string, like a `grep`. The first refresh forgets any recorded PR GitHub has never heard of. Recording is offline: no network, no `gh`, a few milliseconds.
 2. **Refresh.** A background service runs `pr-tracker refresh` every minute. It does nothing until `interval_seconds` (5 minutes by default, give or take some jitter) has passed, then asks GitHub about every open PR with one batched GraphQL query per repository. No open PRs means no network call.
 3. **Notify.** When a PR's checks go red or green, a review comes in, or it's merged or closed, the refresh queues an event for every session that owns it. The same hook delivers queued events into the session's context on its next tool call or prompt. Failing checks and review decisions don't wait for that: when a turn ends with one queued, the agent keeps going to deal with it, and an idle Claude Code session is woken for one within seconds of the refresh that found it. A PR's first refresh is silent: "all checks passing" for a PR opened a minute ago isn't news.
 4. **Browse.** `prs` opens the picker.
@@ -125,7 +125,7 @@ Every tool call, not just shell commands, is a chance to deliver, and a failed s
 | `session_id` | Required | The session to record under and deliver to. Without it, the hook does nothing |
 | `hook_event_name` | Optional | Mode inference: `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit` or `Stop`. Also echoed as `hookEventName` in the output |
 | `tool_name` | Optional | Mode inference: `Bash`, `shell`, `local_shell`, `exec_command`, `run_shell_command` or `powershell` (any case) is a shell call; a name ending in `create_pull_request` is a GitHub MCP call |
-| `tool_input.command` | Shell calls | The command, as a string or an argv list. Only `gh pr create`, `gh stack submit` and `gh stack push` record anything |
+| `tool_input.command` | Shell calls | The command, as a string or an argv list. Only `gh pr create`, `gh stack submit` and `gh stack push` record anything, and only run as a command, not quoted or in a heredoc |
 | `tool_response`, else `error` | When recording | Any shape. PR URLs are read from every string in it. `error` is where `PostToolUseFailure` puts a failed command's output |
 | `stop_hook_active` | Optional | At `Stop`: this turn already continued once, so `stop` only shows events rather than continuing again |
 | `cwd` | Optional | Stored with the PR, and where `gh stack view` runs |
