@@ -175,6 +175,7 @@ def wait(
     poll: float = WAIT_POLL_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    agent: str | None = None,
 ) -> str | None:
     """Block until the session has red checks or a review decision, then claim its events.
 
@@ -187,7 +188,8 @@ def wait(
     from pr_tracker import config, ledger, paths
 
     session_id = _session(payload)
-    if not session_id or is_subagent(payload):
+    # Only Claude Code runs this in the background; anywhere else it would hold up the turn.
+    if not session_id or is_subagent(payload) or (agent or infer_agent(payload)) != "claude":
         return None
     where = paths.resolve(env)
     cfg = config.load(where.config)
@@ -271,7 +273,7 @@ def run(
             return 0
         mode, agent, seconds = parsed
         if mode == "wait":
-            text = wait(payload, env, seconds)
+            text = wait(payload, env, seconds, agent=agent)
             if text:
                 stdout.write(text + "\n")
                 stdout.flush()

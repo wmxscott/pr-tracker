@@ -515,8 +515,10 @@ def test_a_newer_waiter_takes_over(where):
     assert clock.sleeps == 1
 
 
-@pytest.mark.parametrize("extra", [{"agent_id": "sub-1"}, {"session_id": ""}])
-def test_wait_does_nothing_for_subagents_or_without_a_session(where, extra):
+@pytest.mark.parametrize(
+    "extra", [{"agent_id": "sub-1"}, {"session_id": ""}, {"turn_id": "turn-1"}]
+)
+def test_wait_does_nothing_for_subagents_codex_or_without_a_session(where, extra):
     add_event(where.db, add_pr(where.db, 1))
     clock = Clock()
     assert wait(clock, **extra) is None

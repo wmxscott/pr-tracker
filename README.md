@@ -115,7 +115,7 @@ Every tool call, not just shell commands, is a chance to deliver, and a failed s
 | `pr-tracker hook post-tool` | Any other tool call | Delivers queued events | The same |
 | `pr-tracker hook prompt` | You submit a prompt | Delivers queued events alongside it | The same, with `"hookEventName": "UserPromptSubmit"` |
 | `pr-tracker hook stop` | The end of a turn | Failing checks or a review decision queued: hands every queued event to the agent, which keeps going. Otherwise shows them to you, leaving them queued | `{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "..."}}`, or `{"systemMessage": "..."}` |
-| `pr-tracker hook wait [--for SECONDS]` | The end of a turn, in the background | Waits up to `SECONDS` (540 by default) for failing checks or a review decision, then claims every queued event | The events as plain text, then exits 2 |
+| `pr-tracker hook wait [--for SECONDS]` | The end of a turn, in the background | Claude Code only, and returns at once for other agents. Waits up to `SECONDS` (540 by default) for failing checks or a review decision, then claims every queued event | The events as plain text, then exits 2 |
 | `pr-tracker hook` | Any of the above but `wait` | Picks the mode from the payload's `hook_event_name` and `tool_name` | As above |
 
 **Input:** one JSON object on stdin. Every other key is ignored, so a real agent's payload can carry more.
