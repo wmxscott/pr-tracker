@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Open `prs` on a made-up ledger, isolated from your own.
+#
+#   scripts/demo           open the picker in this terminal, to look or to screenshot
+#   scripts/demo --print   print the list instead; any other arguments go to prs
+#   scripts/demo --vhs     regenerate docs/screenshots/*.png with VHS
+#
+# Both seed a fresh ledger in a temporary directory and put a `gh` that always
+# fails first on PATH, so nothing reads your pr-tracker state or reaches GitHub.
+# Needs `uv sync` first; --vhs also needs vhs (`brew install vhs`), fzf, and
+# FiraCode Nerd Font.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+python="$root/.venv/bin/python"
+if [[ ! -x "$python" || ! -x "$root/.venv/bin/prs" ]]; then
+    echo "demo: run 'uv sync' first" >&2
+    exit 1
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/pr-tracker-demo.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/bin" "$tmp/home" "$tmp/state"
+
+cat >"$tmp/bin/gh" <<'EOF'
+#!/bin/sh
+echo "gh: disabled in the pr-tracker demo" >&2
+exit 1
+EOF
+chmod +x "$tmp/bin/gh"
+ln -s "$root/.venv/bin/prs" "$tmp/bin/prs"
+
+session=$("$python" "$root/scripts/demo-ledger.py" "$tmp/state")
+
+export_demo_env() {
+    export PR_TRACKER_STATE_DIR="$tmp/state"
+    export PR_TRACKER_CONFIG="$tmp/settings.toml"
+    export PR_TRACKER_SESSION_ID="$session"
+    export PR_TRACKER_THEME="${PR_TRACKER_THEME:-dark}"
+}
+
+if [[ "${1:-}" != "--vhs" ]]; then
+    export_demo_env
+    PATH="$tmp/bin:$PATH" prs "$@"
+    exit
+fi
+
+# The first executable on PATH that is not a script: a wrapper around fzf
+# would carry its own config into the shot.
+binary() {
+    local dir
+    local IFS=:
+    for dir in $PATH; do
+        if [[ -x "$dir/$1" && "$(head -c 2 "$dir/$1")" != "#!" ]]; then
+            echo "$dir/$1"
+            return
+        fi
+    done
+    echo "demo: $1 not found on PATH" >&2
+    return 1
+}
+
+for tool in vhs ttyd ffmpeg fzf; do
+    ln -s "$(binary "$tool")" "$tmp/bin/$tool"
+done
+
+# Catppuccin Macchiato for fzf's own chrome, to match the picker's palette.
+fzf_colors="--color=bg+:#363a4f,bg:#24273a,spinner:#f4dbd6,hl:#ed8796"
+fzf_colors+=",fg:#cad3f5,header:#cad3f5,info:#c6a0f6,pointer:#f4dbd6"
+fzf_colors+=",marker:#b7bdf8,fg+:#cad3f5,prompt:#c6a0f6,hl+:#ed8796"
+fzf_colors+=",selected-bg:#494d64,border:#6e738d,label:#cad3f5"
+
+# A from-scratch environment: nothing from your shell, prompt or home
+# directory can end up in the frame.
+cd "$root"
+env -i \
+    PATH="$tmp/bin:/usr/bin:/bin" \
+    HOME="$tmp/home" \
+    TMPDIR="$tmp" \
+    TERM=xterm-256color \
+    COLORTERM=truecolor \
+    LANG=en_US.UTF-8 \
+    PS1='$ ' \
+    FZF_DEFAULT_OPTS="$fzf_colors" \
+    PR_TRACKER_STATE_DIR="$tmp/state" \
+    PR_TRACKER_CONFIG="$tmp/settings.toml" \
+    PR_TRACKER_SESSION_ID="$session" \
+    PR_TRACKER_THEME=dark \
+    vhs --quiet --output "$tmp/prs.gif" docs/screenshots/prs.tape
+
+# Lossless recompression; ffmpeg is already here as a VHS dependency.
+for shot in docs/screenshots/prs.png docs/screenshots/prs-all.png; do
+    "$tmp/bin/ffmpeg" -loglevel error -y -i "$shot" -compression_level 100 -pred mixed "$tmp/shot.png"
+    mv "$tmp/shot.png" "$shot"
+    echo "wrote $shot"
+done
