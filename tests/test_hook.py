@@ -175,12 +175,46 @@ def test_waking_off_only_shows(where):
 
 
 def test_other_agents_only_show_at_stop(where):
-    """Only Claude Code is known to continue a turn on Stop additionalContext."""
+    """Only Claude Code, Codex and Pi's extension are known to continue a turn from Stop."""
+    add_event(where.db, add_pr(where.db, 1))
+    _, out = call(["stop", "--agent", "other"], stop())
+    assert "systemMessage" in out
+    assert ledger.drain(where.db, "s", peek=True)
+
+
+def test_pi_continues_a_turn_through_additional_context(where):
     add_event(where.db, add_pr(where.db, 1))
     _, out = call(["stop", "--agent", "pi"], stop())
-    assert "systemMessage" in out
+    assert "checks failing" in out["hookSpecificOutput"]["additionalContext"]
+    assert ledger.drain(where.db, "s", peek=True) == []
+
+
+@pytest.mark.parametrize("kind", ["checks_failed", "review_changed"])
+def test_codex_continues_a_turn_through_a_block_decision(where, kind):
+    """Codex continues a turn only on `decision: block`, with `reason` as the next prompt,
+    and rejects any field its Stop output schema doesn't know."""
+    pr_id = add_pr(where.db, 1)
+    add_event(where.db, pr_id, kind=kind)
+    add_event(where.db, pr_id, signature="abc", kind="checks_passed")
     _, out = call([], stop(turn_id="turn-1"))
-    assert "systemMessage" in out
+    assert set(out) == {"decision", "reason"}
+    assert out["decision"] == "block"
+    assert out["reason"].startswith("Tracked pull request updates:\n")
+    assert "checks_passed" in out["reason"]
+    assert ledger.drain(where.db, "s", peek=True) == []
+
+
+def test_codex_continues_a_turn_only_once(where):
+    add_event(where.db, add_pr(where.db, 1))
+    _, out = call([], stop(turn_id="turn-1", stop_hook_active=True))
+    assert set(out) == {"systemMessage"}
+    assert ledger.drain(where.db, "s", peek=True)
+
+
+def test_codex_only_shows_informational_events(where):
+    add_event(where.db, add_pr(where.db, 1), signature="abc", kind="checks_passed")
+    _, out = call([], stop(turn_id="turn-1"))
+    assert set(out) == {"systemMessage"}
     assert ledger.drain(where.db, "s", peek=True)
 
 
@@ -345,7 +379,8 @@ def test_codex_stop_payload_infers_its_mode(where):
         "last_assistant_message": None,
     }
     _, out = call([], body)
-    assert "checks failing" in out["systemMessage"]
+    assert out["decision"] == "block"
+    assert "checks failing" in out["reason"]
 
 
 @pytest.mark.parametrize("args", [["--agent", "other"], ["post-bash", "--agent=other"]])
@@ -375,11 +410,17 @@ def test_a_synthesized_pi_payload(where):
     assert agent_of(where) == "pi"
 
     add_event(where.db, add_pr(where.db, 3))
-    result = run_cli(["--agent", "pi"], json.dumps(pi_payload(event="Stop")))
+    shown = {**pi_payload(event="Stop"), "stop_hook_active": True}
+    result = run_cli(["--agent", "pi"], json.dumps(shown))
     assert "checks failing" in json.loads(result.stdout)["systemMessage"]
     result = run_cli(["--agent", "pi"], json.dumps(pi_payload()))
     context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
     assert context.startswith("Tracked pull request updates:")
+
+    add_event(where.db, add_pr(where.db, 3), signature="second")
+    result = run_cli(["--agent", "pi"], json.dumps(pi_payload(event="Stop")))
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "checks failing" in context
 
 
 @pytest.mark.parametrize(
@@ -477,9 +518,11 @@ class Clock:
         return self.now
 
 
-def wait(clock, seconds=60, **extra):
+def wait(clock, seconds=60, agent=None, **extra):
     body = {"session_id": "s", "hook_event_name": "Stop", **extra}
-    return hook.wait(body, dict(os.environ), seconds, poll=10, sleep=clock.sleep, clock=clock)
+    return hook.wait(
+        body, dict(os.environ), seconds, poll=10, sleep=clock.sleep, clock=clock, agent=agent
+    )
 
 
 def test_wait_wakes_on_an_actionable_event(where):
@@ -577,3 +620,17 @@ def test_wait_clears_markers_left_by_killed_waiters(where):
     os.utime(stale, (time.time() - 2 * 86400,) * 2)
     wait(Clock(), seconds=10)
     assert sorted(p.name for p in waiters.iterdir()) == ["fresh"]
+
+
+def test_wait_runs_for_pi_but_not_other_agents(where):
+    pr_id = add_pr(where.db, 1)
+    clock = Clock(lambda n: n == 1 and add_event(where.db, pr_id))
+    assert "checks failing" in wait(clock, agent="pi")
+    assert wait(Clock(), agent="other") is None
+
+
+def test_powershell_records_a_created_pr(where):
+    body = payload("gh pr create --fill", url(4))
+    body["tool_name"] = "powershell"
+    call([], body)
+    assert ("o/r", 4) in tracked(where)

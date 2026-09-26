@@ -16,7 +16,7 @@ They answer "which PRs exist?". pr-tracker answers "what did *this session* open
 
 ## How it works
 
-1. **Record.** An agent hook runs `pr-tracker hook` after every tool call. When the command was `gh pr create`, `gh stack submit` or `gh stack push`, it takes the PR URL from the output and writes a row. A URL that `gh pr view` or `gh pr list` merely printed is never recorded. Recording is offline: no network, no `gh`, a few milliseconds.
+1. **Record.** An agent hook runs `pr-tracker hook` after every tool call. When the command ran `gh pr create`, `gh stack submit` or `gh stack push`, it takes the PR URL from the output and writes a row. A URL that `gh pr view` or `gh pr list` printed is never recorded, and neither is one printed by a command that only mentions `gh pr create` in a string, like a `grep`. The first refresh forgets any recorded PR GitHub has never heard of. Recording is offline: no network, no `gh`, a few milliseconds.
 2. **Refresh.** A background service runs `pr-tracker refresh` every minute. It does nothing until `interval_seconds` (5 minutes by default, give or take some jitter) has passed, then asks GitHub about every open PR with one batched GraphQL query per repository. No open PRs means no network call.
 3. **Notify.** When a PR's checks go red or green, a review comes in, or it's merged or closed, the refresh queues an event for every session that owns it. The same hook delivers queued events into the session's context on its next tool call or prompt. Failing checks and review decisions don't wait for that: when a turn ends with one queued, the agent keeps going to deal with it, and an idle Claude Code session is woken for one within seconds of the refresh that found it. A PR's first refresh is silent: "all checks passing" for a PR opened a minute ago isn't news.
 4. **Browse.** `prs` opens the picker.
@@ -115,7 +115,7 @@ Every tool call, not just shell commands, is a chance to deliver, and a failed s
 | `pr-tracker hook post-tool` | Any other tool call | Delivers queued events | The same |
 | `pr-tracker hook prompt` | You submit a prompt | Delivers queued events alongside it | The same, with `"hookEventName": "UserPromptSubmit"` |
 | `pr-tracker hook stop` | The end of a turn | Failing checks or a review decision queued: hands every queued event to the agent, which keeps going. Otherwise shows them to you, leaving them queued | `{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "..."}}`, or `{"systemMessage": "..."}` |
-| `pr-tracker hook wait [--for SECONDS]` | The end of a turn, in the background | Claude Code only, and returns at once for other agents. Waits up to `SECONDS` (540 by default) for failing checks or a review decision, then claims every queued event | The events as plain text, then exits 2 |
+| `pr-tracker hook wait [--for SECONDS]` | The end of a turn, in the background | Claude Code and Pi's extension only, and returns at once for other agents. Waits up to `SECONDS` (540 by default) for failing checks or a review decision, then claims every queued event | The events as plain text, then exits 2 |
 | `pr-tracker hook` | Any of the above but `wait` | Picks the mode from the payload's `hook_event_name` and `tool_name` | As above |
 
 **Input:** one JSON object on stdin. Every other key is ignored, so a real agent's payload can carry more.
@@ -124,8 +124,8 @@ Every tool call, not just shell commands, is a chance to deliver, and a failed s
 |---|---|---|
 | `session_id` | Required | The session to record under and deliver to. Without it, the hook does nothing |
 | `hook_event_name` | Optional | Mode inference: `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit` or `Stop`. Also echoed as `hookEventName` in the output |
-| `tool_name` | Optional | Mode inference: `Bash`, `shell`, `local_shell`, `exec_command` or `run_shell_command` (any case) is a shell call; a name ending in `create_pull_request` is a GitHub MCP call |
-| `tool_input.command` | Shell calls | The command, as a string or an argv list. Only `gh pr create`, `gh stack submit` and `gh stack push` record anything |
+| `tool_name` | Optional | Mode inference: `Bash`, `shell`, `local_shell`, `exec_command`, `run_shell_command` or `powershell` (any case) is a shell call; a name ending in `create_pull_request` is a GitHub MCP call |
+| `tool_input.command` | Shell calls | The command, as a string or an argv list. Only `gh pr create`, `gh stack submit` and `gh stack push` record anything, and only run as a command, not quoted or in a heredoc |
 | `tool_response`, else `error` | When recording | Any shape. PR URLs are read from every string in it. `error` is where `PostToolUseFailure` puts a failed command's output |
 | `stop_hook_active` | Optional | At `Stop`: this turn already continued once, so `stop` only shows events rather than continuing again |
 | `cwd` | Optional | Stored with the PR, and where `gh stack view` runs |
@@ -151,9 +151,9 @@ At the end of a turn, `{"session_id": "abc123", "hook_event_name": "Stop"}` is e
 - **Exit status:** always 0. A bad payload, a locked or broken ledger, a full disk: all of them exit 0 with no output, and any events stay queued. A PR tracker isn't worth breaking a tool call over. The one exception is `wait`, which exits 2 when it prints events, because that's what wakes the agent. Never register `wait` as an ordinary, blocking `Stop` hook: it would hold the turn open while it waits, and its exit 2 would block the stop.
 - **Speed:** no network, ever. With nothing tracked it costs interpreter startup plus a file check, about 30 ms. The ledger waits at most 3 seconds for a lock, so a 10-second hook timeout is plenty.
 - **Subagents:** a payload with `agent_id` or `subagent_id` records its PR but never delivers events. Anything delivered there would vanish with the subagent's context.
-- **Stop continues the turn only for news the agent should act on:** failing checks or a review decision, once per turn (not when `stop_hook_active` is set), and only for Claude Code, whose `Stop` hooks honor `additionalContext`. It never returns `decision: "block"`. Anything else it only peeks at, and the next tool call or prompt delivers it.
+- **Stop continues the turn only for news the agent should act on:** failing checks or a review decision, once per turn (not when `stop_hook_active` is set), and only for Claude Code and Pi's extension, through `additionalContext`, and Codex, through `decision: "block"` with the events as `reason`, which Codex makes the next prompt. Claude Code never gets `decision: "block"`. Anything else it only peeks at, and the next tool call or prompt delivers it.
 - **Each event is delivered once.** Claiming an event and marking it delivered is one transaction, so the hooks can overlap, and `wait` hands off to the next `wait` for the same session rather than piling up.
-- **`--agent NAME`** labels a new session in the ledger. Without it, the label is inferred: `codex` for a payload with `turn_id`, which Codex adds to every turn's hook input and Claude Code doesn't, else `claude`. Adapters for other agents pass it, like `--agent pi`. Beyond the label, it decides one thing: `stop` continues the turn only for `claude`.
+- **`--agent NAME`** labels a new session in the ledger. Without it, the label is inferred: `codex` for a payload with `turn_id`, which Codex adds to every turn's hook input and Claude Code doesn't, else `claude`. Adapters for other agents pass it, like `--agent pi`. Beyond the label, it decides how `stop` continues a turn: through `additionalContext` for `claude` and `pi`, `decision: "block"` for `codex`, and not at all for anything else. `wait` runs only for `claude` and `pi`.
 - **`PR_TRACKER_DISABLE=1`** turns every hook into a no-op.
 
 ### Sessions outside the hook
@@ -368,7 +368,8 @@ description = "session PRs"
 - **GitHub.com only**, through `gh`.
 - **Tested on macOS.** CI also runs on Linux. The picker opens URLs with `open` or `xdg-open`, and copies with `pbcopy`, `wl-copy`, `xclip` or `xsel`.
 - **`gh stack view --json`:** pr-tracker reads the shape gh-stack emits today (`branches[].pr.url`). A scan that succeeds but finds no PRs is logged, so a change in that shape shows up instead of silently losing stacks.
-- **Waking an idle session** needs Claude Code's `asyncRewake` hooks. Codex, Pi and anything else hear about a PR on their next tool call or prompt.
+- **Waking an idle session** needs Claude Code's `asyncRewake` hooks, or Pi's extension. Codex and anything else hear about a PR on their next tool call or prompt.
+- **Codex has no `PostToolUseFailure` event**, so a failed tool call there delivers nothing. The next successful one, or the next prompt, does.
 - **Running sessions keep the hooks they started with.** After installing or updating the plugin, restart them, or they go on running the old hooks, or none.
 - **Subagent session ids:** a PR opened inside a subagent is recorded under the `session_id` its hook payload carries. That's expected to be the parent session's, but it hasn't been confirmed for every agent.
 
