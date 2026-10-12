@@ -234,10 +234,17 @@ prints several at once; all are recorded. The command may arrive as a string
 or an argv list, and the output is taken from every string anywhere in the
 tool response, so the shape of an agent's response doesn't matter.
 
-"Runs" means in command position: at the start, after `;`, `&&`, `||`, `|`,
-`(`, `$(` or a newline, optionally after env assignments or a wrapper such as
-`env` or `rtk`. Quoted strings, heredoc bodies and comments are blanked out
-first, keeping what `$(...)` runs inside double quotes. So
+"Runs" means the words `gh pr create` appear bare in the command, outside
+quotes. Quoted strings, heredoc bodies, comments and backslash-escaped spaces
+are blanked out first, keeping what `$(...)` runs inside double quotes and
+the script in `bash -c '...'`, `sh -lc "..."` or `eval "..."`, and then
+`gh pr create` may appear anywhere. So any wrapper in front counts
+without being listed: `rtk`, `sudo -u bot`, `timeout 60`,
+`gh app-auth exec --repo o/r --`, `op run --`. An earlier version required
+command position, after a separator and a fixed list of wrappers, and missed
+every wrapper not on the list. The cost is that an unquoted mention, as in
+`echo gh pr create`, counts too; it prints no PR URL, so it records nothing
+unless the same command also prints one. So
 `grep -rn "gh pr create"`, a JSON payload piped into `pr-tracker hook`, or a
 heredoc writing a test fixture records nothing, while
 `gh pr create --body "$(cat <<'EOF' ...)"` still does. Agents run exactly

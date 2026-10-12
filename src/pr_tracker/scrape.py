@@ -9,17 +9,21 @@ from typing import Any
 
 PR_URL_RE = re.compile(r"https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/(\d+)")
 
-# Commands that mean "a PR was just created", only where a command starts:
-# after a separator, env assignments or a wrapper. A PR URL printed by
-# `gh pr view`, or by any command that merely mentions `gh pr create`, such as
-# a grep or a test fixture, must never create a row.
-_START = (
-    r"(?:^|[;&|(\n`])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
-    r"(?:(?:env|command|exec|time|nohup|rtk)\s+)*"
+# Commands that mean "a PR was just created", as bare words of the command,
+# so any wrapper in front counts (`rtk`, `sudo -u bot`, `gh app-auth exec --`)
+# without a list of wrappers. A PR URL printed by `gh pr view`, or by any
+# command that merely mentions `gh pr create` in a quoted string, a heredoc or
+# a comment, such as a grep or a test fixture, must never create a row; `_code`
+# blanks those out first.
+_GH = r"(?<![^\s;&|(`/])gh\s+"
+CREATE_RE = re.compile(_GH + r"pr\s+create\b")
+STACK_RE = re.compile(_GH + r"stack\s+(submit|push)\b")
+# A quoted string a shell runs as a script, as in `bash -lc '...'`, `sh -c "..."`
+# or `eval "..."`, is scanned as code rather than blanked out.
+SHELL_SCRIPT_RE = re.compile(
+    r"(?:(?<![^\s;&|(`/])[a-z]*sh(?:\s+-\S+)*\s+-[A-Za-z]*c|(?<![^\s;&|(`])eval)\s+$"
 )
-CREATE_RE = re.compile(_START + r"gh\s+pr\s+create\b")
-STACK_RE = re.compile(_START + r"gh\s+stack\s+(submit|push)\b")
-HEREDOC_RE = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+HEREDOC_RE = re.compile(r"<<(-?)\s*\\?(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 
 # GitHub MCP servers name the tool `create_pull_request`; agents prefix it
 # with the server name, as in `mcp__github__create_pull_request`.
@@ -51,7 +55,8 @@ def _code(text: str, i: int = 0, nested: bool = False) -> tuple[str, int]:
     """`text` from `i` with quoted strings, heredoc bodies and comments blanked out.
 
     What `$(...)` runs inside double quotes is kept, as `url="$(gh pr create)"`
-    runs gh. With `nested`, stops after the `)` that closes the substitution.
+    runs gh, and so is a script a shell runs, as in `bash -c "gh pr create"`.
+    With `nested`, stops after the `)` that closes the substitution.
     """
     out: list[str] = []
     heredocs: list[tuple[bool, str]] = []
@@ -59,22 +64,30 @@ def _code(text: str, i: int = 0, nested: bool = False) -> tuple[str, int]:
     while i < n:
         c = text[i]
         if c == "\\":
-            out.append(" ")
+            # `gh\ pr\ create` is one word, but a line continuation separates two.
+            out.append(" " if text[i + 1 : i + 2] == "\n" else "_")
             i += 2
         elif c == "'":
             end = text.find("'", i + 1)
-            out.append(" ")
-            i = n if end < 0 else end + 1
+            end = n if end < 0 else end
+            script = SHELL_SCRIPT_RE.search("".join(out))
+            out.append(f" {_code(text[i + 1 : end])[0]} " if script else " ")
+            i = end + 1
         elif c == '"':
+            start, kept = i + 1, []
             i += 1
             while i < n and text[i] != '"':
                 if text[i] == "\\":
                     i += 2
                 elif text.startswith("$(", i):
                     inner, i = _code(text, i + 2, nested=True)
-                    out.append(f" $({inner}) ")
+                    kept.append(f" $({inner}) ")
                 else:
                     i += 1
+            if SHELL_SCRIPT_RE.search("".join(out)):
+                script = re.sub(r'\\([\\"$`])', r"\1", text[start:i])
+                kept = [f" {_code(script)[0]} "]
+            out.extend(kept)
             out.append(" ")
             i += 1
         elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|("):
